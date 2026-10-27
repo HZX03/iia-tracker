@@ -181,6 +181,8 @@ tr.future td{background:repeating-linear-gradient(135deg,transparent 0 8px,var(-
 .unl{display:flex;align-items:center;gap:6px}
 .mini{background:none;border:1px solid var(--rule);border-radius:3px;padding:3px 7px;font-size:.76rem;cursor:pointer;white-space:nowrap;color:var(--blue)}
 .mini:hover{border-color:var(--blue);background:var(--blue-soft)}
+.mini.quiet{color:var(--ink-2)}
+.inline-sel{border:1px solid var(--rule);border-radius:3px;padding:4px 6px;background:var(--sheet);color:var(--ink);font-weight:600;margin-left:4px}
 .c-unlock{min-width:190px!important}
 .c-unlock input{width:64px!important;text-transform:uppercase;border:1px solid var(--rule)!important}
 .c-unlock .hint{display:block;font-size:.75rem;color:var(--ink-2);line-height:1.25;margin-top:2px}
@@ -340,7 +342,7 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
 
 <script>
 'use strict';
-const APP_VERSION = '2026-10-27.10';
+const APP_VERSION = '2026-10-27.11';
 /* =========================================================
    Utilities
    ========================================================= */
@@ -481,6 +483,7 @@ function isUnlocked(c, code) {
   code = (code || '').trim().toUpperCase();
   if (!code) return S.settings.unscheduled === 'available';
   if (/^(NOW|ANY|-)$/.test(code)) return true;
+  if (/^(LATER|LOCK|LOCKED|NO|NOTYET)$/.test(code)) return false;
   let m;
   if ((m = code.match(/^L\s*(\d+)$/))) return lectureDone(c, +m[1]);
   if ((m = code.match(/^S\s*(\d+)$/))) {
@@ -504,6 +507,7 @@ function describeUnlock(c, code) {
   }
   if (/^\d{4}-\d{2}-\d{2}$/.test(code)) return 'from ' + fmtShort(parseYmd(code));
   if (/^(NOW|ANY|-)$/.test(code)) return 'any time';
+  if (/^(LATER|LOCK|LOCKED|NO|NOTYET)$/.test(code)) return 'not yet';
   return 'use L4, S2 or a date';
 }
 function qState(c, p, i) {
@@ -1564,12 +1568,14 @@ function schedSummary(c) {
 function unlockCell(c, p, i, dd) {
   const q = p.questions[i], eff = effUnlock(c, p, i), guide = ((c.schedule[p.num] || {})[i + 1]) || '';
   const manualNow = q.unlock != null && /^(NOW|ANY|-)$/i.test(q.unlock);
+  const manualLater = q.unlock != null && /^(LATER|LOCK|LOCKED|NO|NOTYET)$/i.test(q.unlock);
   const locked = !isUnlocked(c, eff);
-  const hint = manualNow ? 'made available by you' : describeUnlock(c, eff) + (q.unlock != null ? ' (edited)' : '');
-  const btn = manualNow
-    ? `<button class="mini" data-act="q-guide" ${dd} title="Go back to ${guide ? 'the guide: ' + describeUnlock(c, guide) : 'no guide entry'}">Undo</button>`
-    : locked ? `<button class="mini" data-act="q-avail" ${dd} title="Mark Q${i + 1} as ready to do now, whatever the guide says">Make available</button>` : '';
-  return `<td class="c-unlock"><div class="unl"><input data-f="qunlock" ${dd} value="${esc(manualNow ? 'NOW' : eff)}" placeholder="any" aria-label="Q${i + 1} available after">${btn}</div><span class="hint">${esc(hint)}</span></td>`;
+  const hint = manualNow ? 'made available by you' : manualLater ? 'marked not yet by you' : describeUnlock(c, eff) + (q.unlock != null ? ' (edited)' : '');
+  let btn = '';
+  if (manualNow) btn = `<button class="mini" data-act="q-guide" ${dd} title="Go back to ${guide ? 'the guide: ' + describeUnlock(c, guide) : 'the default for questions not in the guide'}">Undo</button>`;
+  else if (locked) btn = `<button class="mini" data-act="q-avail" ${dd} title="Mark Q${i + 1} as ready to do now, whatever the guide says">Make available</button>`;
+  else if (!q.status) btn = `<button class="mini quiet" data-act="q-later" ${dd} title="Grey Q${i + 1} out until you make it available">Not yet</button>`;
+  return `<td class="c-unlock"><div class="unl"><input data-f="qunlock" ${dd} value="${esc(manualNow ? 'NOW' : manualLater ? 'LATER' : eff)}" placeholder="any" aria-label="Q${i + 1} available after">${btn}</div><span class="hint">${esc(hint)}</span></td>`;
 }
 function qTable(c, p, kind) {
   const isP = kind === 'paper';
@@ -1611,10 +1617,12 @@ function paperView(c, p) {
   </div>
   <details class="sched" ${c.scheduleText ? '' : 'open'}>${schedBox(c)}</details>
   ${LEGEND}
+  ${p.questions.some((_, i) => !((c.schedule[p.num] || {})[i + 1])) ? `<div class="toolbar" style="margin-top:8px"><label class="muted grow">Questions the guide doesn’t mention are
+    <select data-f="set-unsched-sel" class="inline-sel"><option value="available" ${S.settings.unscheduled === 'available' ? 'selected' : ''}>available straight away</option><option value="locked" ${S.settings.unscheduled === 'locked' ? 'selected' : ''}>greyed out until I make them available</option></select></label></div>` : ''}
   ${p.questions.some((_, i) => qState(c, p, i) === 'grey') ? `<div class="toolbar" style="margin-top:8px"><span class="muted grow">${p.questions.filter((_, i) => qState(c, p, i) === 'grey').length} question(s) aren’t available yet.</span><button class="btn" data-act="avail-all" ${dd}>Make all available now</button></div>` : ''}
   ${p.questions.some(q => q.unlock != null) ? `<div class="toolbar" style="margin-top:8px"><span class="muted grow">${p.questions.filter(q => q.unlock != null).length} question(s) have “Available after” edited by hand, so the guide doesn’t apply to them.</span><button class="btn" data-act="reset-unlock" ${dd}>Use the guide for all questions</button></div>` : ''}
   ${p.questions.length ? qTable(c, p, 'paper') : `<p class="muted" style="margin-top:12px">No questions yet. Use + to add them.</p>`}
-  <p class="muted" style="font-size:.82rem;margin-top:8px">“Available after” takes L4 (after lecture 4), S2 (after section 2), a date like 2026-11-03, NOW (available straight away), or blank. “Make available” next to a grey question does the same as typing NOW. Click a question number to cycle its status.</p>`;
+  <p class="muted" style="font-size:.82rem;margin-top:8px">“Available after” takes L4 (after lecture 4), S2 (after section 2), a date like 2026-11-03, NOW (available straight away), LATER (greyed out until you change it), or blank. The “Make available” and “Not yet” buttons do the same as typing NOW or LATER. Click a question number to cycle its status.</p>`;
 }
 function triposTab(c) {
   const p = c.tripos.find(x => x.id === c.activeTrip) || c.tripos[0];
@@ -1735,6 +1743,7 @@ async function act(a, d) {
     case 'pdf': return openPdf(d.key);
     case 'copy-setup': try { await navigator.clipboard.writeText(setupLink()); toast('Setup link copied. Send it to your phone and open it there.'); } catch (e) { prompt('Copy this link:', setupLink()); } return;
     case 'q-avail': { const q = getQ(d); q.unlock = 'NOW'; toast(`Q${+d.q + 1} is available now`); break; }
+    case 'q-later': { const q = getQ(d); q.unlock = 'LATER'; toast(`Q${+d.q + 1} greyed out until you make it available`); break; }
     case 'q-guide': { const q = getQ(d); q.unlock = null; toast(`Q${+d.q + 1} follows the guide again`); break; }
     case 'avail-all': { const p = getP(d), c2 = cur(); let n = 0; p.questions.forEach((q, i) => { if (qState(c2, p, i) === 'grey') { q.unlock = 'NOW'; n++; } }); toast(`${n} question${n === 1 ? '' : 's'} made available. “Use the guide for all questions” undoes this.`); break; }
     case 'reset-unlock': getP(d).questions.forEach(q => { q.unlock = null; }); toast('All questions now follow the guide'); break;
@@ -1871,7 +1880,7 @@ function field(f, el, ev) {
     case 'secdone': c.sections[d.k].done = el.checked; save(); return render();
     case 'schedfile': { const file = el.files[0]; el.value = ''; if (file) importSchedule(file).catch(e => toast(e.message, 'err')); return; }
     case 'set-unlock': S.settings.unlockMode = el.value; save(); return render();
-    case 'set-unsched': S.settings.unscheduled = el.value; save(); return render();
+    case 'set-unsched': case 'set-unsched-sel': S.settings.unscheduled = el.value; save(); return render();
     case 'set-intervals': {
       const iv = el.value.split(/[,\s]+/).map(Number).filter(n => n > 0);
       if (!iv.length) { toast('Enter numbers of days, e.g. 1, 7, 21', 'err'); return render(); }

@@ -274,6 +274,21 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
 .todo-list{list-style:none;margin:0;padding:0}
 .todo-list li{display:flex;align-items:center;gap:14px;padding:8px 14px;border-bottom:1px solid var(--rule);flex-wrap:wrap}
 .todo-list li:last-child{border-bottom:0}
+.rowh.qh{white-space:normal}
+.parts-tag{display:block;margin-top:4px;background:none;border:0;padding:0 2px;font-size:.74rem;color:var(--blue);cursor:pointer;white-space:nowrap}
+.parts-tag.add{color:var(--ink-2);opacity:.55}
+tr:hover .parts-tag.add,.parts-tag.add:focus-visible{opacity:1}
+@media (hover:none){.parts-tag.add{opacity:.8}}
+tr.has-parts>*{border-bottom-style:dashed}
+tr.part-row>*{background:color-mix(in srgb,var(--paper) 55%,var(--sheet));padding-top:5px;padding-bottom:5px}
+tr.part-row:not(.last)>*{border-bottom-style:dotted}
+tr.part-row th.rowh{padding-left:28px;background:color-mix(in srgb,var(--paper) 55%,var(--sheet))}
+.qcell.part{min-width:44px;height:30px;font-size:1rem}
+.parts-sum{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:.85rem;color:var(--ink-2)}
+.pbar{display:inline-flex;gap:2px}
+.pbar i{width:14px;height:12px;border-radius:2px;border:1px solid rgba(22,40,61,.3);display:inline-block}
+.part-ctl{display:inline-flex;gap:4px}
+.qcell.small.wide{min-width:62px}
 .qcell.small{min-width:46px;height:32px;font-size:1.05rem;cursor:default}
 .todo-info{flex:1;min-width:200px;display:flex;flex-direction:column;font-size:.88rem}
 .todo-since.old{color:var(--late)}
@@ -361,7 +376,7 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
 
 <script>
 'use strict';
-const APP_VERSION = '2026-10-27.12';
+const APP_VERSION = '2026-10-27.13';
 /* =========================================================
    Utilities
    ========================================================= */
@@ -695,14 +710,43 @@ async function pdfLines(buf) {
   }
   return lines;
 }
-function countQuestions(lines) {
-  let expected = 1;
+/* Questions, and the (a), (b), (c)… parts inside each, read from the paper's text */
+function analyseQuestions(lines) {
+  let expected = 1, cur = 0; const parts = [];
   for (const line of lines) {
     if (/^\s*(answers?|solutions?)\b/i.test(line) && expected > 2) break;
-    const m = line.match(/^\s*(?:question\s+|q\.?\s*)?(\d{1,2})\s*[.)]?(?:\s+\S|\s*$)/i);
-    if (m && +m[1] === expected) expected++;
+    const m = line.match(/^\s*(?:question\s+|q\.?\s*)?(\d{1,2})\s*[.)]?(?:\s+(\S.*)|\s*$)/i);
+    let rest = line;
+    if (m && +m[1] === expected) { cur = expected++; parts[cur - 1] = 0; rest = m[2] || ''; }
+    if (!cur) continue;
+    const pm = rest.match(/^\s*\(\s*([a-z])\s*\)/i) || rest.match(/^\s*([a-h])\)\s/);
+    if (pm) { const idx = pm[1].toLowerCase().charCodeAt(0) - 97; if (idx === parts[cur - 1]) parts[cur - 1]++; }
   }
-  return expected - 1;
+  return { nq: expected - 1, parts: parts.map(n => n >= 2 ? n : 0) };
+}
+const countQuestions = lines => analyseQuestions(lines).nq;
+const partLabel = k => String.fromCharCode(97 + k);
+const newPart = (k, from) => ({ label: partLabel(k), status: from ? from.status : '', comment: '', date: from ? from.date : '', crib: false });
+/* A question split into parts takes its status from them: all done = done, any “can’t do” = can’t do, any query = query */
+function syncParts(q) {
+  if (!q.parts || !q.parts.length) return;
+  const st = q.parts.map(x => x.status);
+  q.status = st.every(x => x === 'green') ? 'green' : st.includes('red') ? 'red' : st.includes('yellow') ? 'yellow' : '';
+  const dates = q.parts.map(x => x.date).filter(Boolean).sort();
+  q.date = q.status ? (dates[dates.length - 1] || q.date) : '';
+  q.crib = q.parts.every(x => x.crib);
+}
+function setParts(q, n) {
+  n = Math.max(0, Math.min(12, n | 0));
+  if (n < 2) {
+    if (q.parts && q.parts.length) { const keep = q.parts[0]; Object.assign(q, { status: keep.status, date: keep.date, crib: keep.crib }); if (keep.comment) q.comment = [q.comment, keep.comment].filter(Boolean).join(' '); }
+    q.parts = []; return;
+  }
+  q.parts ||= [];
+  if (!q.parts.length) { for (let k = 0; k < n; k++) q.parts.push(newPart(k, q.status ? q : null)); }
+  while (q.parts.length < n) q.parts.push(newPart(q.parts.length));
+  q.parts.length = n; q.parts.forEach((x, k) => x.label = partLabel(k));
+  syncParts(q);
 }
 function findPaperNum(s, strict) {
   s = String(s || '').replace(new RegExp(CODE_RE.source, 'gi'), ' ');   // a course code like 3A3 is never the paper number
@@ -744,7 +788,8 @@ async function analysePdf(f, zone) {
   else if (!num && kind === 'paper') { num = '1'; numNote = 'guessed: check'; }
   const ym = f.name.match(/\b(19|20)\d{2}\b/) || head.match(/\b(19|20)\d{2}\b/);
   const tl = lines.slice(0, 12).find(l => /examples?\s+paper/i.test(l));
-  return { id: uid(), file: f, lines, code, kind, num, numNote, year: ym ? ym[0] : '', nq: countQuestions(lines), nqEdited: false,
+  const aq = analyseQuestions(lines);
+  return { id: uid(), file: f, lines, code, kind, num, numNote, year: ym ? ym[0] : '', nq: aq.nq, partsFound: aq.parts, nqEdited: false,
     title: tl ? tl.replace(/.*examples?\s+paper\s*\d*\s*[:\-–]?\s*/i, '').trim().slice(0, 80) : '', err };
 }
 function impTarget(r) {
@@ -814,7 +859,7 @@ function renderImport() {
       : trip ? `<input data-imp="year" data-r="${r.id}" value="${esc(r.year)}" placeholder="2024" inputmode="numeric" style="width:72px" aria-label="Year">`
       : `<input data-imp="num" data-r="${r.id}" value="${esc(r.num)}" placeholder="1" inputmode="numeric" style="width:52px" aria-label="Paper number">${r.numNote ? `<small>${esc(r.numNote)}</small>` : ''}`;
     const nqCell = r.kind === 'sched' || crib ? '<span class="muted">—</span>'
-      : `<input type="number" min="0" max="80" data-imp="nq" data-r="${r.id}" value="${r.nq || ''}" placeholder="?" style="width:60px" aria-label="Number of questions"><small>${r.nqEdited ? '' : r.nq ? 'counted' : 'not found'}</small>`;
+      : `<input type="number" min="0" max="80" data-imp="nq" data-r="${r.id}" value="${r.nq || ''}" placeholder="?" style="width:60px" aria-label="Number of questions"><small>${r.nqEdited ? '' : r.nq ? 'counted' : 'not found'}${!r.nqEdited && r.partsFound && r.partsFound.some(Boolean) ? `, parts in ${r.partsFound.filter(Boolean).length}` : ''}</small>`;
     return `<tr>
       <td class="imp-file"><b>${esc(r.file.name)}</b>${r.err ? `<small class="bad">${esc(r.err)}</small>` : ''}</td>
       <td><input data-imp="code" data-r="${r.id}" value="${esc(r.code)}" list="imp-codes" placeholder="3A3" style="width:70px;text-transform:uppercase" aria-label="Course code"></td>
@@ -843,6 +888,7 @@ async function commitPdf(r) {
     else if (n > p.questions.length) resizeQs(p, n);
     else if (isNew && trip && !p.questions.length) resizeQs(p, 3);
     if (!trip && !p.title && r.title) p.title = r.title;
+    if (r.partsFound) p.questions.forEach((q, i) => { if (r.partsFound[i] && !(q.parts && q.parts.length)) setParts(q, r.partsFound[i]); });
   } else if (isNew && n) resizeQs(p, n);
   const k = `pdf:${code}:${p.id}:${r.kind}`;
   try { await idbPut(k, r.file); p[crib ? 'crib' : 'pdf'] = k; }
@@ -1425,8 +1471,12 @@ function queryItems() {
   const out = [];
   for (const code of S.order) {
     const c = S.courses[code];
-    c.papers.forEach(p => p.questions.forEach((q, i) => { if (q.status === 'red' || q.status === 'yellow') out.push({ code, where: `Examples paper ${p.num}`, q: i + 1, st: q.status, comment: q.comment, tab: 'examples', pid: p.id }); }));
-    c.tripos.forEach(p => p.questions.forEach((q, i) => { if (q.status === 'red' || q.status === 'yellow') out.push({ code, where: `Tripos ${p.year}`, q: i + 1, st: q.status, comment: q.comment, tab: 'tripos', pid: p.id }); }));
+    const each = (p, where, tab) => p.questions.forEach((q, i) => {
+      if (q.parts && q.parts.length) q.parts.forEach(x => { if (x.status === 'red' || x.status === 'yellow') out.push({ code, where, q: `${i + 1}(${x.label})`, st: x.status, comment: [x.comment, q.comment].filter(Boolean).join('. '), tab, pid: p.id }); });
+      else if (q.status === 'red' || q.status === 'yellow') out.push({ code, where, q: i + 1, st: q.status, comment: q.comment, tab, pid: p.id });
+    });
+    c.papers.forEach(p => each(p, `Examples paper ${p.num}`, 'examples'));
+    c.tripos.forEach(p => each(p, `Tripos ${p.year}`, 'tripos'));
   }
   return out;
 }
@@ -1477,6 +1527,17 @@ function overviewView() {
 }
 
 /* ---------- To do: every available, unfinished question, by paper ---------- */
+/* one row per question, or per unfinished part when a question is split */
+function todoRows(p, isLocked, qst, want) {
+  const out = [];
+  p.questions.forEach((q, i) => {
+    if (q.parts && q.parts.length) {
+      const locked = isLocked(i);
+      q.parts.forEach((x, k) => { const st = x.status || (locked ? 'grey' : 'white'); if (want(st)) out.push({ q, i, st, part: k, x }); });
+    } else { const st = qst(i); if (want(st)) out.push({ q, i, st }); }
+  });
+  return out;
+}
 function todoView() {
   const f = S.ui.todoF ||= { white: true, red: false, yellow: false, tripos: false };
   const want = st => (st === 'white' && f.white) || (st === 'red' && f.red) || (st === 'yellow' && f.yellow);
@@ -1484,11 +1545,11 @@ function todoView() {
   const blocks = S.order.map(code => {
     const c = S.courses[code], papers = [];
     c.papers.forEach(p => {
-      const qs = p.questions.map((q, i) => ({ q, i, st: qState(c, p, i) })).filter(x => want(x.st));
+      const qs = todoRows(p, i => !isUnlocked(c, effUnlock(c, p, i)), i => qState(c, p, i), want);
       if (qs.length) papers.push({ p, kind: 'paper', label: `Examples paper ${p.num}${p.title ? ': ' + p.title : ''}`, qs });
     });
     if (f.tripos) c.tripos.forEach(p => {
-      const qs = p.questions.map((q, i) => ({ q, i, st: q.status || 'white' })).filter(x => want(x.st));
+      const qs = todoRows(p, () => false, i => p.questions[i].status || 'white', want);
       if (qs.length) papers.push({ p, kind: 'trip', label: `Tripos ${p.year}`, qs });
     });
     if (!papers.length) return '';
@@ -1497,15 +1558,16 @@ function todoView() {
         total += qs.length;
         const goto = `data-act="goto" data-code="${esc(code)}" data-tab="${kind === 'trip' ? 'tripos' : 'examples'}" data-pid="${p.id}"`;
         return `<div class="todo-paper"><div class="todo-ph"><h3>${esc(label)}</h3><span class="muted">${qs.length} to do</span><span class="grow"></span><button class="mini" ${goto}>Open paper</button></div>
-        <ul class="todo-list">${qs.map(({ q, i, st }) => {
-          const dd = `data-code="${esc(code)}" data-kind="${kind}" data-pid="${p.id}" data-q="${i}"`;
+        <ul class="todo-list">${qs.map(({ q, i, st, part, x }) => {
+          const dd = `data-code="${esc(code)}" data-kind="${kind}" data-pid="${p.id}" data-q="${i}"${part != null ? ` data-part="${part}"` : ''}`;
+          const qlab = `Q${i + 1}${x ? `(${x.label})` : ''}`, com = x ? [x.comment, q.comment].filter(Boolean).join('. ') : q.comment;
           const since = kind === 'paper' ? availableSince(c, p, i) : null;
           const age = since && since.date ? daysBetween(since.date, t) : null;
           const sinceTxt = kind === 'trip' ? 'past paper'
             : since.date ? `${since.date > t ? 'from' : 'available since'} ${fmtShort(parseYmd(since.date))}${age > 0 ? ` (${age} d)` : age === 0 ? ' (today)' : ''}, ${since.why}` : since.why;
-          return `<li><span class="qcell st-${st} small">Q${i + 1}</span>
-            <span class="todo-info"><span class="todo-since${age >= 14 ? ' old' : ''}">${esc(sinceTxt)}</span>${q.comment ? `<span class="muted todo-com">${esc(q.comment)}</span>` : ''}</span>
-            <span class="seg">${STATUSES.filter(([v]) => v).map(([v, cls, lab]) => `<button class="sbtn" data-act="qs" ${dd} data-s="${v}" title="Mark Q${i + 1} ${lab.toLowerCase()}"><i class="st-${cls}"></i>${lab}</button>`).join('')}</span></li>`;
+          return `<li><span class="qcell st-${st} small${x ? ' wide' : ''}">${qlab}</span>
+            <span class="todo-info"><span class="todo-since${age >= 14 ? ' old' : ''}">${esc(sinceTxt)}</span>${com ? `<span class="muted todo-com">${esc(com)}</span>` : ''}</span>
+            <span class="seg">${STATUSES.filter(([v]) => v).map(([v, cls, lab]) => `<button class="sbtn" data-act="${x ? 'ps' : 'qs'}" ${dd} data-s="${v}" title="Mark ${qlab} ${lab.toLowerCase()}"><i class="st-${cls}"></i>${lab}</button>`).join('')}</span></li>`;
         }).join('')}</ul></div>`;
       }).join('')}</section>`;
   }).join('');
@@ -1652,18 +1714,41 @@ function unlockCell(c, p, i, dd) {
 }
 function qTable(c, p, kind) {
   const isP = kind === 'paper';
+  const seg = (cur, act, dd, extra = '') => `<span class="seg">${STATUSES.map(([v, cls, lab]) => `<button class="sbtn ${cur === v ? 'on' : ''}" data-act="${act}" ${dd} ${extra} data-s="${v}" aria-pressed="${cur === v}"><i class="st-${cls}"></i>${lab}</button>`).join('')}</span>`;
   const rows = p.questions.map((q, i) => {
     const st = isP ? qState(c, p, i) : (q.status || 'white');
+    const locked = isP && !isUnlocked(c, effUnlock(c, p, i));
     const dd = `data-kind="${kind}" data-pid="${p.id}" data-q="${i}"`;
-    const eff = isP ? effUnlock(c, p, i) : '';
-    return `<tr>
-      <th scope="row" class="rowh" style="min-width:76px"><button class="qcell st-${st}" data-act="qcycle" ${dd} title="${ST_LABEL[st]} — click to cycle status">Q${i + 1}</button></th>
+    const parts = q.parts && q.parts.length ? q.parts : null;
+    const open = parts && !q.collapsed;
+    const done = parts ? parts.filter(x => x.status === 'green').length : 0;
+    const qcell = parts
+      ? `<button class="qcell st-${st}" data-act="q-toggle" ${dd} title="${open ? 'Hide' : 'Show'} parts">Q${i + 1}</button><button class="parts-tag" data-act="q-toggle" ${dd}>${open ? '▾' : '▸'} ${parts.length} parts</button>`
+      : `<button class="qcell st-${st}" data-act="qcycle" ${dd} title="${ST_LABEL[st]}: click to cycle status">Q${i + 1}</button><button class="parts-tag add" data-act="part-split" ${dd} title="Split Q${i + 1} into parts (a), (b)…">+ parts</button>`;
+    const statusCell = parts
+      ? `<div class="parts-sum"><span class="pbar">${parts.map(x => `<i class="st-${x.status || (locked ? 'grey' : 'white')}" title="(${x.label}) ${ST_LABEL[x.status || (locked ? 'grey' : 'white')]}"></i>`).join('')}</span><span>${done} of ${parts.length} parts done</span>
+         <span class="part-ctl"><button class="mini" data-act="part-add" ${dd} title="Add part (${partLabel(parts.length)})">+ part</button><button class="mini quiet" data-act="part-rm" ${dd} title="Remove part (${parts[parts.length - 1].label})">− part</button></span></div>`
+      : seg(q.status, 'qs', dd);
+    let html = `<tr class="${parts ? 'has-parts' : ''}">
+      <th scope="row" class="rowh qh">${qcell}</th>
       ${isP ? unlockCell(c, p, i, dd) : ''}
-      <td><span class="seg">${STATUSES.map(([v, cls, lab]) => `<button class="sbtn ${q.status === v ? 'on' : ''}" data-act="qs" ${dd} data-s="${v}" aria-pressed="${q.status === v}"><i class="st-${cls}"></i>${lab}</button>`).join('')}</span></td>
-      <td><input type="date" data-f="qdate" ${dd} value="${esc(q.date)}" aria-label="Q${i + 1} date"></td>
+      <td>${statusCell}</td>
+      <td>${parts ? (q.date ? `<span class="muted">${fmtShort(parseYmd(q.date))}</span>` : '') : `<input type="date" data-f="qdate" ${dd} value="${esc(q.date)}" aria-label="Q${i + 1} date">`}</td>
       ${!isP ? `<td class="c-time"><input type="number" min="0" data-f="qtime" ${dd} value="${esc(q.time)}" placeholder="min" aria-label="Q${i + 1} minutes taken"></td>` : ''}
-      <td style="text-align:center"><input type="checkbox" data-f="qcrib" ${dd} ${q.crib ? 'checked' : ''} aria-label="Q${i + 1} checked against crib"></td>
-      <td class="c-com"><textarea rows="1" data-f="qcom" ${dd} placeholder="Comment" aria-label="Q${i + 1} comment">${esc(q.comment)}</textarea></td></tr>`;
+      <td style="text-align:center">${parts ? '' : `<input type="checkbox" data-f="qcrib" ${dd} ${q.crib ? 'checked' : ''} aria-label="Q${i + 1} checked against crib">`}</td>
+      <td class="c-com"><textarea rows="1" data-f="qcom" ${dd} placeholder="${parts ? 'Comment on the whole question' : 'Comment'}" aria-label="Q${i + 1} comment">${esc(q.comment)}</textarea></td></tr>`;
+    if (open) html += parts.map((x, k) => {
+      const pd = `${dd} data-part="${k}"`, pst = x.status || (locked ? 'grey' : 'white');
+      return `<tr class="part-row${k === parts.length - 1 ? ' last' : ''}">
+        <th scope="row" class="rowh"><button class="qcell part st-${pst}" data-act="pcycle" ${pd} title="Q${i + 1}(${x.label}): ${ST_LABEL[pst]}. Click to cycle">(${x.label})</button></th>
+        ${isP ? `<td class="c-unlock"><span class="hint">${locked ? 'not yet, as Q' + (i + 1) : 'as Q' + (i + 1)}</span></td>` : ''}
+        <td>${seg(x.status, 'ps', pd)}</td>
+        <td><input type="date" data-f="pdate" ${pd} value="${esc(x.date)}" aria-label="Q${i + 1}(${x.label}) date"></td>
+        ${!isP ? '<td></td>' : ''}
+        <td style="text-align:center"><input type="checkbox" data-f="pcrib" ${pd} ${x.crib ? 'checked' : ''} aria-label="Q${i + 1}(${x.label}) checked against crib"></td>
+        <td class="c-com"><textarea rows="1" data-f="pcom" ${pd} placeholder="Comment on (${x.label})" aria-label="Q${i + 1}(${x.label}) comment">${esc(x.comment)}</textarea></td></tr>`;
+    }).join('');
+    return html;
   }).join('');
   return `<div class="scroll"><table class="tbl"><thead><tr><th>Question</th>${isP ? '<th>Available after</th>' : ''}<th>Status</th><th>Date</th>${!isP ? '<th>Time</th>' : ''}<th>Crib</th><th>Comment</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
@@ -1686,6 +1771,7 @@ function paperView(c, p) {
     ${moveSelect(c, dd)}
     <span class="nq">Questions <button class="icon" data-act="nq" ${dd} data-d="-1" aria-label="One fewer question">−</button><b>${p.questions.length}</b><button class="icon" data-act="nq" ${dd} data-d="1" aria-label="One more question">+</button></span>
     ${pdfButtons(p, dd)}
+    ${p.pdf ? `<button class="btn" data-act="detect-parts" ${dd} title="Read the PDF again and split questions into their (a), (b), (c) parts">Find parts</button>` : ''}
     <button class="btn danger" data-act="del-paper" ${dd}>Delete</button>
   </div>
   <details class="sched" ${c.scheduleText ? '' : 'open'}>${schedBox(c)}</details>
@@ -1712,6 +1798,7 @@ function triposTab(c) {
   ${p ? `<div class="paper-head"><h2 class="pnum-h">Tripos <input class="pnum pyear" data-f="tyear" ${dd} value="${esc(p.year)}" inputmode="numeric" aria-label="Year" title="Change the year"></h2>${moveSelect(c, dd)}<span style="flex:1"></span>
       <span class="nq">Questions <button class="icon" data-act="nq" ${dd} data-d="-1" aria-label="One fewer question">−</button><b>${p.questions.length}</b><button class="icon" data-act="nq" ${dd} data-d="1" aria-label="One more question">+</button></span>
       ${pdfButtons(p, dd)}
+      ${p.pdf ? `<button class="btn" data-act="detect-parts" ${dd} title="Read the PDF again and split questions into their (a), (b), (c) parts">Find parts</button>` : ''}
       <button class="btn danger" data-act="del-trip" ${dd}>Delete</button></div>
     ${LEGEND.replace('<span><i class="st-grey"></i>Not time yet</span>', '')}
     ${qTable(c, p, 'trip')}` : ''}`;
@@ -1811,7 +1898,39 @@ async function act(a, d) {
     }
     case 'del-lec': if (!confirm(`Delete L${+d.i + 1}? Later lectures will be renumbered.`)) return; c.lectures.splice(+d.i, 1); break;
 
-    case 'qs': { const q = getQ(d); q.status = d.s; if (d.s && !q.date) q.date = todayStr(); break; }
+    case 'qs': {
+      const q = getQ(d);
+      if (q.parts && q.parts.length) { q.parts.forEach(x => { x.status = d.s; if (d.s && !x.date) x.date = todayStr(); }); syncParts(q); break; }
+      q.status = d.s; if (d.s && !q.date) q.date = todayStr(); break;
+    }
+    case 'ps': { const q = getQ(d), x = q.parts[+d.part]; x.status = d.s; if (d.s && !x.date) x.date = todayStr(); syncParts(q); break; }
+    case 'pcycle': { const q = getQ(d), x = q.parts[+d.part], order = ['', 'green', 'yellow', 'red']; x.status = order[(order.indexOf(x.status) + 1) % 4]; if (x.status && !x.date) x.date = todayStr(); syncParts(q); break; }
+    case 'q-toggle': { const q = getQ(d); q.collapsed = !q.collapsed; save({ quiet: true }); return render(); }
+    case 'part-split': {
+      const q = getQ(d), n = parseInt(prompt(`How many parts does Q${+d.q + 1} have? (2 for (a)–(b), 3 for (a)–(c)…)`, '3'), 10);
+      if (!(n >= 2)) return; setParts(q, n); q.collapsed = false; break;
+    }
+    case 'part-add': { const q = getQ(d); setParts(q, q.parts.length + 1); break; }
+    case 'part-rm': {
+      const q = getQ(d), last = q.parts[q.parts.length - 1];
+      if ((last.status || last.comment) && !confirm(`Remove part (${last.label}) and its progress?`)) return;
+      if (q.parts.length <= 2 && !confirm(`That leaves Q${+d.q + 1} with one part, so it goes back to a single question. Continue?`)) return;
+      setParts(q, q.parts.length - 1); break;
+    }
+    case 'detect-parts': {
+      const p = getP(d), blob = p.pdf && await idbGet(p.pdf).catch(() => null);
+      if (!blob) { toast('The PDF isn’t stored in this browser. Attach it again with Replace, then try again.', 'err'); return; }
+      toast('Reading the PDF…');
+      const aq = analyseQuestions(await pdfLines(await blob.arrayBuffer()));
+      let n = 0, skipped = 0;
+      p.questions.forEach((q, i) => {
+        const k = aq.parts[i] || 0; if (k < 2) return;
+        if (q.parts && q.parts.length) { skipped++; return; }
+        setParts(q, k); n++;
+      });
+      toast(n ? `Split ${n} question${n === 1 ? '' : 's'} into parts${skipped ? ` (${skipped} already had parts)` : ''}` : skipped ? 'Every question with parts already has them.' : 'No (a), (b)… parts found in this PDF. Use “+ parts” on a question to add them by hand.');
+      if (!n) return; break;
+    }
     case 'qcycle': { const q = getQ(d), order = ['', 'green', 'yellow', 'red']; q.status = order[(order.indexOf(q.status) + 1) % 4]; if (q.status && !q.date) q.date = todayStr(); break; }
     case 'nq': { const p = getP(d); if (!resizeQs(p, p.questions.length + +d.d)) return; break; }
     case 'pdf': return openPdf(d.key);
@@ -1902,7 +2021,7 @@ function coverageSections(c, i, text) {
   save(); render();
   toast(`Section ${changed.join(', ')} now ends after L${i + 1}, so its examples questions unlock from then.`);
 }
-const LIVE = new Set(['cname', 'lnote', 'lcov', 'qcom', 'ptitle', 'schedtext', 'qtime']);
+const LIVE = new Set(['cname', 'lnote', 'lcov', 'qcom', 'pcom', 'ptitle', 'schedtext', 'qtime']);
 function field(f, el, ev) {
   const c = cur(), d = el.dataset, i = +d.i, k = +d.k;
   if (f === 'lcov' && ev === 'change') { save(); return coverageSections(c, i, el.value); }
@@ -1912,6 +2031,7 @@ function field(f, el, ev) {
     case 'lnote': c.lectures[i].note = el.value; return saveSoon();
     case 'lcov': c.lectures[i].covered = el.value; return saveSoon();
     case 'qcom': getQ(d).comment = el.value; return saveSoon();
+    case 'pcom': getQ(d).parts[+d.part].comment = el.value; return saveSoon();
     case 'qtime': getQ(d).time = el.value; return saveSoon();
     case 'ptitle': getP(d).title = el.value; return saveSoon();
     case 'schedtext': c.scheduleText = el.value; return saveSoon();
@@ -1920,6 +2040,8 @@ function field(f, el, ev) {
     case 'qdate': getQ(d).date = el.value; return save();
     case 'qavaildate': getQ(d).availAt = el.value; save(); return render();
     case 'qcrib': getQ(d).crib = el.checked; return save();
+    case 'pcrib': { const q = getQ(d); q.parts[+d.part].crib = el.checked; syncParts(q); return save(); }
+    case 'pdate': { const q = getQ(d); q.parts[+d.part].date = el.value; syncParts(q); save(); return render(); }
     case 'qunlock': {
       const p = getP(d), q = getQ(d), v = el.value.trim().toUpperCase().replace(/\s+/g, '');
       const sched = ((c.schedule[p.num] || {})[+d.q + 1]) || '';

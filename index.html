@@ -151,6 +151,9 @@ tr.future td{background:repeating-linear-gradient(135deg,transparent 0 8px,var(-
 .tbl input[type=date]{border:1px solid var(--rule);border-radius:3px;background:transparent;padding:3px 4px}
 .tbl textarea{resize:vertical;min-height:32px;line-height:1.35;field-sizing:content}
 .c-note{min-width:180px}
+.c-cov{min-width:150px}
+.c-cov input{border:1px solid var(--rule)!important}
+.c-cov .hint{display:block;font-size:.75rem;color:var(--ink-2);margin-top:2px;padding-left:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:190px}
 .c-com{min-width:220px}
 .c-unlock{min-width:118px}
 .c-unlock input::placeholder{text-transform:none}
@@ -342,7 +345,7 @@ const STORE = 'iia-tripos-tracker-v1';
 const DEFAULT_STATE = () => ({
   version: 1, courses: {}, order: [],
   ui: { view: 'overview', course: null },
-  settings: { unlockMode: 'date', unscheduled: 'available', intervals: [1, 7, 21], gdClientId: '', gdFileId: '', gdAuto: true, gdLast: null, localLast: null, exportLast: null },
+  settings: { unlockMode: 'date', unscheduled: 'available', intervals: [1, 7, 21], gdClientId: '', gdFileId: '', gdAuto: true, gdLast: null, gdConnected: false, gdEmail: '', localLast: null, exportLast: null },
   updatedAt: null
 });
 function fixCourse(c) {
@@ -354,6 +357,7 @@ function fixCourse(c) {
 }
 function migrate(s) {
   const d = DEFAULT_STATE();
+  if (s.settings && s.settings.gdConnected === undefined && s.settings.gdLast) s.settings.gdConnected = true;
   s.settings = { ...d.settings, ...(s.settings || {}) };
   s.ui = { ...d.ui, ...(s.ui || {}) };
   s.courses ||= {}; s.order = (s.order || Object.keys(s.courses)).filter(k => s.courses[k]);
@@ -773,7 +777,7 @@ function restoreFrom(obj, source) {
   if (!obj || !obj.courses) throw new Error('This file is not a tracker backup.');
   const n = Object.keys(obj.courses).length;
   if (!confirm(`Replace everything in this browser with the backup from ${source} (${n} course${n === 1 ? '' : 's'}, saved ${obj.updatedAt ? new Date(obj.updatedAt).toLocaleString('en-GB') : 'unknown'})?`)) return false;
-  const keep = { gdClientId: S.settings.gdClientId, gdFileId: S.settings.gdFileId };
+  const keep = { gdClientId: S.settings.gdClientId, gdFileId: S.settings.gdFileId, gdConnected: S.settings.gdConnected, gdEmail: S.settings.gdEmail, gdAuto: S.settings.gdAuto };
   S = migrate(obj); Object.assign(S.settings, keep);
   save(); render(); toast('Backup restored'); return true;
 }
@@ -791,7 +795,7 @@ async function pickLocalFile() {
 }
 async function reconnectLocal() {
   if (!localHandle) return pickLocalFile();
-  if ((await localHandle.requestPermission({ mode: 'readwrite' })) === 'granted') { localState = 'on'; await writeLocal(true); }
+  if ((await localHandle.requestPermission({ mode: 'readwrite' })) === 'granted') { localState = 'on'; await writeLocal(true); renderMain(); }
 }
 async function writeLocal(loud) {
   if (!localHandle) return;
@@ -810,13 +814,17 @@ async function initLocal() {
 }
 
 /* Google Drive (drive.file scope: the app only sees files it created) */
+const GD_TOKEN_KEY = 'iia-tracker-gd-token';
 let gdToken = null, gdExp = 0, gdClient = null, gdPending = null, gdState = 'off';
 const gdValid = () => gdToken && Date.now() < gdExp - 60000;
+try { const t = JSON.parse(localStorage.getItem(GD_TOKEN_KEY) || 'null'); if (t && t.exp > Date.now() + 60000) { gdToken = t.token; gdExp = t.exp; gdState = 'on'; } } catch (e) {}
+function gdStoreToken() { try { gdToken ? localStorage.setItem(GD_TOKEN_KEY, JSON.stringify({ token: gdToken, exp: gdExp })) : localStorage.removeItem(GD_TOKEN_KEY); } catch (e) {} }
+const needsSync = last => S.updatedAt && (!last || S.updatedAt > last);
 async function gdInit() {
   if (!S.settings.gdClientId) throw new Error('Add your Google OAuth client ID in Backup & settings first.');
   await loadScript('https://accounts.google.com/gsi/client');
   gdClient ||= google.accounts.oauth2.initTokenClient({
-    client_id: S.settings.gdClientId, scope: 'https://www.googleapis.com/auth/drive.file',
+    client_id: S.settings.gdClientId, scope: 'https://www.googleapis.com/auth/drive.file', login_hint: S.settings.gdEmail || undefined,
     callback: r => gdPending && gdPending(r), error_callback: e => gdPending && gdPending({ error: e.type || 'popup_closed' })
   });
 }
@@ -826,14 +834,16 @@ function gdAuth() {
     gdPending = r => {
       gdPending = null;
       if (r.error) return rej(new Error('Google sign-in did not finish (' + r.error + ').'));
-      gdToken = r.access_token; gdExp = Date.now() + (r.expires_in || 3600) * 1000; gdState = 'on'; renderSide(); res(gdToken);
+      gdToken = r.access_token; gdExp = Date.now() + (r.expires_in || 3600) * 1000; gdState = 'on'; gdStoreToken();
+      S.settings.gdConnected = true; save({ quiet: true }); renderSide(); res(gdToken);
+      if (!S.settings.gdEmail) gdFetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)').then(x => x.json()).then(j => { if (j.user) { S.settings.gdEmail = j.user.emailAddress; save({ quiet: true }); } }).catch(() => {});
     };
-    gdClient.requestAccessToken({ prompt: '' });
+    gdClient.requestAccessToken({ prompt: '', login_hint: S.settings.gdEmail || undefined });
   });
 }
 async function gdFetch(url, opts = {}) {
   const r = await fetch(url, { ...opts, headers: { Authorization: 'Bearer ' + gdToken, ...(opts.headers || {}) } });
-  if (r.status === 401) { gdToken = null; gdState = 'paused'; renderSide(); throw new Error('Google Drive session expired — reconnect in Backup & settings.'); }
+  if (r.status === 401) { gdToken = null; gdStoreToken(); gdState = 'paused'; renderSide(); throw new Error('Google Drive session expired — reconnect in Backup & settings.'); }
   if (!r.ok && r.status !== 404) throw new Error('Google Drive error ' + r.status);
   return r;
 }
@@ -914,8 +924,8 @@ function renderSide() {
   }).join('') || `<p class="side-empty">Drop a lecture timetable (.ics) anywhere to add your first course.</p>`;
   const s = S.settings, lines = [];
   lines.push(`<div class="row"><span>This browser</span><span>${S.updatedAt ? 'saved' : '—'}</span></div>`);
-  if (localHandle) lines.push(`<div class="row"><span>Local file</span><span class="${localState === 'on' ? '' : 'warn'}">${localState === 'on' ? (ago(s.localLast) || 'on') : 'reconnect'}</span></div>`);
-  if (s.gdClientId) lines.push(`<div class="row"><span>Google Drive</span><span class="${gdValid() ? '' : 'warn'}">${gdValid() ? (ago(s.gdLast) || 'connected') : 'reconnect'}</span></div>`);
+  if (localHandle) lines.push(`<div class="row"><span>Local file</span><span class="${localState === 'on' ? '' : 'warn'}">${localState === 'on' ? (ago(s.localLast) || 'on') : 'allow on click'}</span></div>`);
+  if (s.gdClientId) lines.push(`<div class="row"><span>Google Drive</span><span class="${gdValid() ? '' : 'warn'}">${gdValid() ? (ago(s.gdLast) || 'connected') : s.gdConnected ? 'renews on click' : 'reconnect'}</span></div>`);
   if (!localHandle && !s.gdLast && !s.exportLast && S.order.length) lines.push(`<div class="warn" style="margin-top:6px">No backup yet</div>`);
   $('#side-foot').innerHTML = lines.join('');
 }
@@ -1021,14 +1031,16 @@ function courseView(c) {
 
 function lecturesTab(c) {
   const iv = S.settings.intervals;
-  const head = `<tr><th>Lecture</th><th>1st watch</th>${Array.from({ length: c.reviewCols }, (_, k) => `<th>${ordinal(k + 2)} review</th>`).join('')}
+  const head = `<tr><th>Lecture</th><th title="Where in the lecture notes this lecture got to, e.g. p.14, §2.3 or end of section 2">Notes covered to</th><th>1st watch</th>${Array.from({ length: c.reviewCols }, (_, k) => `<th>${ordinal(k + 2)} review</th>`).join('')}
     <th><button class="icon" data-act="add-col" title="Add a review column" aria-label="Add a review column" style="color:var(--blue)">＋</button>${c.reviewCols > 1 ? `<button class="icon" data-act="rm-col" title="Remove last review column" aria-label="Remove last review column">−</button>` : ''}</th>
     <th>Next review</th><th>Notes</th><th></th></tr>`;
   const t = todayStr();
   const rows = c.lectures.map((l, i) => {
     const d = new Date(l.start), future = ymd(d) > t;
     const ends = Object.entries(c.sections).filter(([, s]) => +s.after === i + 1).map(([k]) => 'Section ' + k).join(', ');
-    let cells = `<td>${l.watched ? dateCell('wdate', i, null, l.watched) : `<button class="stamp" data-act="watch" data-i="${i}" title="Stamps the lecture date; edit it afterwards if you watched later">Mark watched</button>`}</td>`;
+    const prevCov = (c.lectures.slice(0, i).reverse().find(x => x.covered) || {}).covered;
+    let cells = `<td class="c-cov"><input data-f="lcov" data-i="${i}" value="${esc(l.covered || '')}" placeholder="${future ? '' : 'e.g. p.14, §2.3'}" aria-label="Lecture ${i + 1} notes covered up to">${prevCov ? `<span class="hint">from ${esc(prevCov)}</span>` : ''}</td>`;
+    cells += `<td>${l.watched ? dateCell('wdate', i, null, l.watched) : `<button class="stamp" data-act="watch" data-i="${i}" title="Stamps the lecture date; edit it afterwards if you watched later">Mark watched</button>`}</td>`;
     for (let k = 0; k < c.reviewCols; k++) {
       const v = l.reviews[k], prevOk = k === 0 ? !!l.watched : !!l.reviews[k - 1];
       cells += `<td>${v ? dateCell('rdate', i, k, v) : prevOk && k === l.reviews.length ? `<button class="stamp ghost" data-act="rev" data-i="${i}" data-k="${k}">Log today</button>` : '<span class="dash">–</span>'}</td>`;
@@ -1171,7 +1183,7 @@ function settingsView() {
       <h3 style="margin-top:16px">Local file</h3>
       ${fsSupported ? `<p class="muted">Pick a file once (for example in a folder that syncs to OneDrive or iCloud) and every change is written to it.</p>
         <div class="btn-row">${localHandle ? `<button class="btn" data-act="local-reconnect">${localState === 'on' ? 'Back up now' : 'Reconnect backup file'}</button><button class="btn" data-act="local-pick">Choose a different file…</button>` : `<button class="btn primary" data-act="local-pick">Choose backup file…</button>`}</div>
-        ${localHandle ? `<p class="status-line">Writing to ${esc(localHandle.name)}${s.localLast ? `, last ${ago(s.localLast)}` : ''}${localState !== 'on' ? '. Paused until you reconnect (browsers ask again after a restart).' : ''}</p>` : ''}`
+        ${localHandle ? `<p class="status-line">Writing to ${esc(localHandle.name)}${s.localLast ? `, last ${ago(s.localLast)}` : ''}${localState !== 'on' ? '. Paused: click anywhere in the app and Chrome will ask to allow access again. Choose “Allow on every visit” and it won’t ask after future refreshes.' : ''}</p>` : ''}`
         : `<p class="muted">Automatic file backup needs Chrome or Edge. In this browser, download a copy instead.</p>`}
       <div class="btn-row"><button class="btn" data-act="export">Download backup (.json)</button><button class="btn" data-act="pick-file">Restore from file…</button></div>
       ${s.exportLast ? `<p class="status-line">Last downloaded ${ago(s.exportLast)}.</p>` : ''}
@@ -1184,8 +1196,9 @@ function settingsView() {
       <div class="btn-row">
         <button class="btn primary" data-act="gd-connect" ${s.gdClientId ? '' : 'disabled'}>${gdValid() ? 'Back up now' : 'Connect and back up'}</button>
         <button class="btn" data-act="gd-restore" ${s.gdClientId ? '' : 'disabled'}>Restore from Drive</button>
+        ${s.gdConnected ? '<button class="btn" data-act="gd-disconnect">Disconnect</button>' : ''}
       </div>
-      <p class="status-line">${gdValid() ? `Connected${s.gdLast ? `, last backup ${ago(s.gdLast)}` : ''}.` : s.gdLast ? `Last backup ${ago(s.gdLast)}. Google sign-ins last an hour, so reconnect to resume automatic backups.` : 'Not connected.'} Saves ${BACKUP_NAME} in your Drive; Drive keeps earlier versions.</p>
+      <p class="status-line">${gdValid() ? `Connected${s.gdEmail ? ' as ' + esc(s.gdEmail) : ''}${s.gdLast ? `, last backup ${ago(s.gdLast)}` : ''}.` : s.gdConnected ? `Google sign-ins expire after an hour. The app renews it the next time you click anything, and backs up any changes made meanwhile.${s.gdLast ? ` Last backup ${ago(s.gdLast)}.` : ''}` : 'Not connected.'} Saves ${BACKUP_NAME} in your Drive; Drive keeps earlier versions.</p>
     </div>
     <div class="sheet">
       <h2>Question availability</h2>
@@ -1282,6 +1295,10 @@ async function act(a, d) {
     case 'local-pick': await pickLocalFile(); return render();
     case 'local-reconnect': await reconnectLocal(); return render();
     case 'gd-connect': try { gdValid() ? await gdBackup(true) : await gdConnect(); } catch (e) { toast(e.message, 'err'); } return render();
+    case 'gd-disconnect': {
+      if (gdToken && window.google) try { google.accounts.oauth2.revoke(gdToken, () => {}); } catch (e) {}
+      gdToken = null; gdExp = 0; gdStoreToken(); gdClient = null; Object.assign(S.settings, { gdConnected: false, gdEmail: '' }); save({ quiet: true }); toast('Disconnected from Google Drive'); return render();
+    }
     case 'gd-restore': try { await gdRestore(); } catch (e) { toast(e.message, 'err'); } return render();
     default: return;
   }
@@ -1300,13 +1317,32 @@ function applyLecDate(c, i, value) {
   c.editLec = null; save(); render();
   toast(ni !== i ? `Moved to ${fmtDay(nd)}; it is now L${ni + 1} and later lectures were renumbered` : `L${i + 1} moved to ${fmtDay(nd)}, ${fmtTime(nd)}`);
 }
-const LIVE = new Set(['cname', 'lnote', 'qcom', 'ptitle', 'schedtext', 'qtime']);
+/* “end of section 3”, “S3 end”, “finished §3” in a lecture's coverage marks where that handout section finishes,
+   which is what unlocks section-based examples questions */
+function coverageSections(c, i, text) {
+  const found = new Set();
+  const re1 = /\b(?:end(?:\s+of)?|finish(?:ed|es)?|complete[ds]?|done)\s*(?:section|handout|sec\.?|§|s)\s*(\d+)/gi;
+  const re2 = /(?:section|handout|sec\.?|§|\bs)\s*(\d+)\s*(?:end(?:ed|s)?|finish(?:ed)?|complete[d]?|done)\b/gi;
+  let m; while ((m = re1.exec(text))) found.add(String(+m[1])); while ((m = re2.exec(text))) found.add(String(+m[1]));
+  if (!found.size) return;
+  const changed = [];
+  for (const k of found) {
+    const sec = c.sections[k] ||= { after: null, done: false };
+    if (sec.after !== i + 1) { sec.after = i + 1; changed.push(k); }
+  }
+  if (!changed.length) return;
+  save(); render();
+  toast(`Section ${changed.join(', ')} now ends after L${i + 1}, so its examples questions unlock from then.`);
+}
+const LIVE = new Set(['cname', 'lnote', 'lcov', 'qcom', 'ptitle', 'schedtext', 'qtime']);
 function field(f, el, ev) {
   const c = cur(), d = el.dataset, i = +d.i, k = +d.k;
+  if (f === 'lcov' && ev === 'change') { save(); return coverageSections(c, i, el.value); }
   if (LIVE.has(f) && ev === 'change') { if (f === 'cname') { save(); renderSide(); } else save(); return; }
   switch (f) {
     case 'cname': c.name = el.value; return saveSoon();
     case 'lnote': c.lectures[i].note = el.value; return saveSoon();
+    case 'lcov': c.lectures[i].covered = el.value; return saveSoon();
     case 'qcom': getQ(d).comment = el.value; return saveSoon();
     case 'qtime': getQ(d).time = el.value; return saveSoon();
     case 'ptitle': getP(d).title = el.value; return saveSoon();
@@ -1398,8 +1434,30 @@ document.addEventListener('paste', e => {
   }
 });
 
+let lastSilent = 0;
+document.addEventListener('click', e => {
+  if (Date.now() - lastSilent < 120000) return;
+  const t = e.target.closest && e.target.closest('[data-act]');
+  if (t && /^(gd-|local-)/.test(t.dataset.act)) return;
+  if (localHandle && localState === 'paused') {
+    lastSilent = Date.now();
+    localHandle.requestPermission({ mode: 'readwrite' }).then(p => {
+      if (p !== 'granted') return;
+      localState = 'on'; renderSide(); if (S.ui.view === 'settings') renderMain();
+      if (needsSync(S.settings.localLast)) writeLocal(false).catch(() => {});
+    }).catch(() => {});
+    return;
+  }
+  if (S.settings.gdConnected && S.settings.gdClientId && !gdValid() && gdClient) {
+    lastSilent = Date.now();
+    gdAuth().then(() => { if (S.ui.view === 'settings') renderMain(); if (S.settings.gdAuto && needsSync(S.settings.gdLast)) return gdBackup(false); }).catch(() => {});
+  }
+}, true);
+
 render();
 initLocal();
+if (S.settings.gdConnected && S.settings.gdClientId) gdInit().catch(() => {});
+if (gdValid() && S.settings.gdAuto && needsSync(S.settings.gdLast)) setTimeout(() => gdBackup(false).catch(() => {}), 1500);
 setInterval(() => renderSide(), 60000);
 </script>
 </body>

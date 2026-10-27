@@ -178,6 +178,10 @@ tr.future td{background:repeating-linear-gradient(135deg,transparent 0 8px,var(-
 .c-com{min-width:220px}
 .c-unlock{min-width:118px}
 .c-unlock input::placeholder{text-transform:none}
+.unl{display:flex;align-items:center;gap:6px}
+.mini{background:none;border:1px solid var(--rule);border-radius:3px;padding:3px 7px;font-size:.76rem;cursor:pointer;white-space:nowrap;color:var(--blue)}
+.mini:hover{border-color:var(--blue);background:var(--blue-soft)}
+.c-unlock{min-width:190px!important}
 .c-unlock input{width:64px!important;text-transform:uppercase;border:1px solid var(--rule)!important}
 .c-unlock .hint{display:block;font-size:.75rem;color:var(--ink-2);line-height:1.25;margin-top:2px}
 .c-time input{width:72px!important;border:1px solid var(--rule)!important}
@@ -336,7 +340,7 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
 
 <script>
 'use strict';
-const APP_VERSION = '2026-10-27.9';
+const APP_VERSION = '2026-10-27.10';
 /* =========================================================
    Utilities
    ========================================================= */
@@ -1557,6 +1561,16 @@ function schedSummary(c) {
     return `<div class="sum-row"><span class="sum-p">Paper ${esc(n)}${p ? '' : ' <small>(not added yet)</small>'}</span><span>${order.map(t => `${tLabel(t)}: ${groups[t].join(', ')}`).join('<span class="sep"> · </span>')}</span></div>`;
   }).join('')}<p class="muted" style="font-size:.8rem;margin:6px 0 0">Questions not listed are treated as ${S.settings.unscheduled === 'available' ? 'available any time' : 'locked'} (change this in Backup &amp; settings). If this is wrong, edit the text above and apply again.</p></div>`;
 }
+function unlockCell(c, p, i, dd) {
+  const q = p.questions[i], eff = effUnlock(c, p, i), guide = ((c.schedule[p.num] || {})[i + 1]) || '';
+  const manualNow = q.unlock != null && /^(NOW|ANY|-)$/i.test(q.unlock);
+  const locked = !isUnlocked(c, eff);
+  const hint = manualNow ? 'made available by you' : describeUnlock(c, eff) + (q.unlock != null ? ' (edited)' : '');
+  const btn = manualNow
+    ? `<button class="mini" data-act="q-guide" ${dd} title="Go back to ${guide ? 'the guide: ' + describeUnlock(c, guide) : 'no guide entry'}">Undo</button>`
+    : locked ? `<button class="mini" data-act="q-avail" ${dd} title="Mark Q${i + 1} as ready to do now, whatever the guide says">Make available</button>` : '';
+  return `<td class="c-unlock"><div class="unl"><input data-f="qunlock" ${dd} value="${esc(manualNow ? 'NOW' : eff)}" placeholder="any" aria-label="Q${i + 1} available after">${btn}</div><span class="hint">${esc(hint)}</span></td>`;
+}
 function qTable(c, p, kind) {
   const isP = kind === 'paper';
   const rows = p.questions.map((q, i) => {
@@ -1565,7 +1579,7 @@ function qTable(c, p, kind) {
     const eff = isP ? effUnlock(c, p, i) : '';
     return `<tr>
       <th scope="row" class="rowh" style="min-width:76px"><button class="qcell st-${st}" data-act="qcycle" ${dd} title="${ST_LABEL[st]} — click to cycle status">Q${i + 1}</button></th>
-      ${isP ? `<td class="c-unlock"><input data-f="qunlock" ${dd} value="${esc(eff)}" placeholder="any" aria-label="Q${i + 1} available after"><span class="hint">${esc(describeUnlock(c, eff))}${q.unlock != null ? ' (edited)' : ''}</span></td>` : ''}
+      ${isP ? unlockCell(c, p, i, dd) : ''}
       <td><span class="seg">${STATUSES.map(([v, cls, lab]) => `<button class="sbtn ${q.status === v ? 'on' : ''}" data-act="qs" ${dd} data-s="${v}" aria-pressed="${q.status === v}"><i class="st-${cls}"></i>${lab}</button>`).join('')}</span></td>
       <td><input type="date" data-f="qdate" ${dd} value="${esc(q.date)}" aria-label="Q${i + 1} date"></td>
       ${!isP ? `<td class="c-time"><input type="number" min="0" data-f="qtime" ${dd} value="${esc(q.time)}" placeholder="min" aria-label="Q${i + 1} minutes taken"></td>` : ''}
@@ -1597,9 +1611,10 @@ function paperView(c, p) {
   </div>
   <details class="sched" ${c.scheduleText ? '' : 'open'}>${schedBox(c)}</details>
   ${LEGEND}
+  ${p.questions.some((_, i) => qState(c, p, i) === 'grey') ? `<div class="toolbar" style="margin-top:8px"><span class="muted grow">${p.questions.filter((_, i) => qState(c, p, i) === 'grey').length} question(s) aren’t available yet.</span><button class="btn" data-act="avail-all" ${dd}>Make all available now</button></div>` : ''}
   ${p.questions.some(q => q.unlock != null) ? `<div class="toolbar" style="margin-top:8px"><span class="muted grow">${p.questions.filter(q => q.unlock != null).length} question(s) have “Available after” edited by hand, so the guide doesn’t apply to them.</span><button class="btn" data-act="reset-unlock" ${dd}>Use the guide for all questions</button></div>` : ''}
   ${p.questions.length ? qTable(c, p, 'paper') : `<p class="muted" style="margin-top:12px">No questions yet. Use + to add them.</p>`}
-  <p class="muted" style="font-size:.82rem;margin-top:8px">“Available after” takes L4 (after lecture 4), S2 (after section 2), a date like 2026-11-03, or blank. Click a question number to cycle its status.</p>`;
+  <p class="muted" style="font-size:.82rem;margin-top:8px">“Available after” takes L4 (after lecture 4), S2 (after section 2), a date like 2026-11-03, NOW (available straight away), or blank. “Make available” next to a grey question does the same as typing NOW. Click a question number to cycle its status.</p>`;
 }
 function triposTab(c) {
   const p = c.tripos.find(x => x.id === c.activeTrip) || c.tripos[0];
@@ -1719,6 +1734,9 @@ async function act(a, d) {
     case 'nq': { const p = getP(d); if (!resizeQs(p, p.questions.length + +d.d)) return; break; }
     case 'pdf': return openPdf(d.key);
     case 'copy-setup': try { await navigator.clipboard.writeText(setupLink()); toast('Setup link copied. Send it to your phone and open it there.'); } catch (e) { prompt('Copy this link:', setupLink()); } return;
+    case 'q-avail': { const q = getQ(d); q.unlock = 'NOW'; toast(`Q${+d.q + 1} is available now`); break; }
+    case 'q-guide': { const q = getQ(d); q.unlock = null; toast(`Q${+d.q + 1} follows the guide again`); break; }
+    case 'avail-all': { const p = getP(d), c2 = cur(); let n = 0; p.questions.forEach((q, i) => { if (qState(c2, p, i) === 'grey') { q.unlock = 'NOW'; n++; } }); toast(`${n} question${n === 1 ? '' : 's'} made available. “Use the guide for all questions” undoes this.`); break; }
     case 'reset-unlock': getP(d).questions.forEach(q => { q.unlock = null; }); toast('All questions now follow the guide'); break;
     case 'apply-sched': { const ta = $('textarea[data-f="schedtext"]'); return applyScheduleText(c, ta ? ta.value : c.scheduleText); }
     case 'add-paper': {

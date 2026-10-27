@@ -64,6 +64,7 @@ button,input,select,textarea{font:inherit;color:inherit}
 .side-foot .warn{color:#F6C76B}
 .sync-chip{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:4px;padding:8px 10px;margin-bottom:10px;color:var(--side-ink);cursor:pointer;font-size:.8rem;line-height:1.3}
 .sync-chip:hover{background:rgba(255,255,255,.11)}
+.sync-chip small{display:block;font-size:.7rem;color:var(--side-dim);margin-bottom:1px}
 .sync-chip i,.sync-dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
 .sync-dot{margin-right:7px;vertical-align:0}
 .k-ok i,.sync-dot.k-ok{background:#5CC489}
@@ -269,6 +270,7 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
   .ov-grid{grid-template-columns:1fr}
   .sync-float{display:block;position:fixed;left:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:40;max-width:calc(100vw - 24px)}
   .sync-float .sync-chip{background:var(--side);margin:0;box-shadow:0 4px 14px rgba(0,0,0,.2);width:auto}
+  .sync-float{display:flex;flex-direction:column;gap:6px}
   .sync-float .sync-chip.k-ok span{display:none}
   main{padding-top:20px}
 }
@@ -361,7 +363,7 @@ const STORE = 'iia-tripos-tracker-v1';
 const DEFAULT_STATE = () => ({
   version: 1, courses: {}, order: [],
   ui: { view: 'overview', course: null },
-  settings: { unlockMode: 'date', unscheduled: 'available', intervals: [1, 7, 21], gdClientId: '', gdFileId: '', gdAuto: true, gdLast: null, gdConnected: false, gdEmail: '', localLast: null, exportLast: null },
+  settings: { unlockMode: 'date', unscheduled: 'available', intervals: [1, 7, 21], gdClientId: '', gdFileId: '', gdAuto: true, gdLast: null, gdConnected: false, gdEmail: '', localAuto: true, localLast: null, exportLast: null },
   updatedAt: null
 });
 function fixCourse(c) {
@@ -374,6 +376,7 @@ function fixCourse(c) {
 function migrate(s) {
   const d = DEFAULT_STATE();
   if (s.settings && s.settings.gdConnected === undefined && s.settings.gdLast) s.settings.gdConnected = true;
+  if (s.settings && s.settings.localSyncedVersion === undefined && s.settings.localLast && s.updatedAt && s.updatedAt <= s.settings.localLast) s.settings.localSyncedVersion = s.updatedAt;
   if (s.settings && s.settings.gdSyncedVersion === undefined && s.settings.gdLast && s.updatedAt && s.updatedAt <= s.settings.gdLast) s.settings.gdSyncedVersion = s.updatedAt;
   s.settings = { ...d.settings, ...(s.settings || {}) };
   s.ui = { ...d.ui, ...(s.ui || {}) };
@@ -795,32 +798,145 @@ function restoreFrom(obj, source) {
   if (!obj || !obj.courses) throw new Error('This file is not a tracker backup.');
   const n = Object.keys(obj.courses).length;
   if (!confirm(`Replace everything in this browser with the backup from ${source} (${n} course${n === 1 ? '' : 's'}, saved ${obj.updatedAt ? new Date(obj.updatedAt).toLocaleString('en-GB') : 'unknown'})?`)) return false;
-  const keep = Object.fromEntries(['gdClientId', 'gdFileId', 'gdConnected', 'gdEmail', 'gdAuto', 'gdRemoteMod', 'gdSyncedVersion', 'gdLast', 'localLast', 'exportLast'].map(k => [k, S.settings[k]]));
+  const keep = Object.fromEntries(DEVICE_KEYS.map(k => [k, S.settings[k]]));
   S = migrate(obj); Object.assign(S.settings, keep);
   save(); render(); toast('Backup restored'); return true;
 }
 async function importBackupFile(f) { restoreFrom(JSON.parse(await f.text()), f.name); }
 
-/* Local file auto-backup (Chrome / Edge File System Access API) */
+/* =========================================================
+   Local backup file (Chrome / Edge File System Access API)
+   - every change is written ~1.5 s later
+   - before writing, the file is read so a newer copy synced in from another device
+     (e.g. through OneDrive / iCloud) is never silently overwritten
+   - when the tab regains focus, newer data in the file is loaded if this browser is clean
+   ========================================================= */
 let localHandle = null, localState = 'off';
 const fsSupported = 'showSaveFilePicker' in window;
-async function pickLocalFile() {
+const lsync = { phase: 'idle', error: '', timer: null, inflight: false, retry: 0 };
+const localDirty = () => !!S.updatedAt && S.updatedAt !== S.settings.localSyncedVersion;
+const localOn = () => !!localHandle && localState === 'on';
+async function readLocalFile() {
+  const t = await (await localHandle.getFile()).text();
+  if (!t.trim()) return null;
+  try { const j = JSON.parse(t); return j && j.courses ? j : null; } catch (e) { return null; }
+}
+/* Device-specific settings survive when data is loaded from Drive or the file */
+const DEVICE_KEYS = ['gdClientId', 'gdFileId', 'gdConnected', 'gdEmail', 'gdAuto', 'gdRemoteMod', 'gdSyncedVersion', 'gdLast', 'localAuto', 'localSyncedVersion', 'localLast', 'exportLast'];
+function applyData(data, after) {
+  const keep = Object.fromEntries(DEVICE_KEYS.map(k => [k, S.settings[k]])), ui = S.ui;
+  S = migrate(data);
+  Object.assign(S.settings, keep);
+  after(S.settings);
+  if (S.courses[ui.course] || ui.view !== 'course') S.ui = ui;
+  save({ quiet: true }); render();
+  scheduleLocal(800); scheduleDrive(1200);   // pass the loaded data on to the other backup
+}
+function applyLocal(data) {
+  lsync.phase = 'idle';
+  applyData(data, st => Object.assign(st, { localSyncedVersion: data.updatedAt, localLast: new Date().toISOString() }));
+}
+async function writeLocal(loud, force) {
+  if (!localHandle) return;
+  if ((await localHandle.queryPermission({ mode: 'readwrite' })) !== 'granted') { localState = 'paused'; renderSync(); return; }
+  localState = 'on';
+  lsync.inflight = true; lsync.phase = 'saving'; renderSync();
   try {
-    localHandle = await window.showSaveFilePicker({ suggestedName: BACKUP_NAME, types: [{ description: 'Tracker backup', accept: { 'application/json': ['.json'] } }] });
-    await idbPut('localHandle', localHandle); localState = 'on';
-    await writeLocal(true);
-  } catch (e) { if (e.name !== 'AbortError') toast(e.message, 'err'); }
+    if (!force && S.settings.localSyncedVersion) {
+      const cur = await readLocalFile();
+      if (cur && cur.updatedAt && cur.updatedAt !== S.settings.localSyncedVersion && cur.updatedAt !== S.updatedAt && cur.updatedAt > S.settings.localSyncedVersion)
+        throw Object.assign(new Error('The file has newer changes'), { conflict: true });
+    }
+    const snap = S.updatedAt;
+    const w = await localHandle.createWritable(); await w.write(backupJSON()); await w.close();
+    Object.assign(S.settings, { localSyncedVersion: snap, localLast: new Date().toISOString() });
+    save({ quiet: true });
+    lsync.phase = 'idle'; lsync.error = ''; lsync.retry = 0;
+    if (loud) toast(`Saved to ${localHandle.name}`);
+  } finally { lsync.inflight = false; renderSync(); }
+}
+async function localCheck() {
+  if (!localOn() || lsync.inflight || lsync.phase === 'conflict') return;
+  lsync.inflight = true;
+  try {
+    const cur = await readLocalFile();
+    const base = S.settings.localSyncedVersion;
+    if (!cur || !cur.updatedAt || !base || cur.updatedAt === base) return;
+    if (cur.updatedAt === S.updatedAt) { S.settings.localSyncedVersion = cur.updatedAt; save({ quiet: true }); return; }
+    if (cur.updatedAt < base) return;                 // older copy put there by hand: next save overwrites it
+    if (localDirty()) { lsync.phase = 'conflict'; return; }
+    lsync.inflight = false;
+    applyLocal(cur); toast(`Loaded newer changes from ${localHandle.name}`);
+  } catch (e) { lsync.phase = 'error'; lsync.error = e.message; }
+  finally { lsync.inflight = false; renderSync(); }
+}
+function scheduleLocal(delay = 1500) {
+  clearTimeout(lsync.timer);
+  if (localHandle && S.settings.localAuto !== false) lsync.timer = setTimeout(runLocalSync, delay);
+  renderSync();
+}
+async function runLocalSync() {
+  if (!localHandle || S.settings.localAuto === false || lsync.phase === 'conflict') return renderSync();
+  if (lsync.inflight) return scheduleLocal(1000);
+  if (!localOn() || !localDirty()) return renderSync();
+  try {
+    await writeLocal(false, false);
+    if (localDirty()) scheduleLocal(1000);
+  } catch (e) {
+    if (e.conflict) lsync.phase = 'conflict';
+    else { lsync.phase = 'error'; lsync.error = e.message; lsync.retry++; scheduleLocal(Math.min(60000, 2000 * 2 ** lsync.retry)); }
+    renderSync();
+  }
+}
+async function pickLocalFile() {
+  let h;
+  try { h = await window.showSaveFilePicker({ suggestedName: BACKUP_NAME, types: [{ description: 'Tracker backup', accept: { 'application/json': ['.json'] } }] }); }
+  catch (e) { if (e.name !== 'AbortError') toast(e.message, 'err'); return; }
+  localHandle = h; localState = 'on'; lsync.phase = 'idle';
+  await idbPut('localHandle', h);
+  S.settings.localSyncedVersion = '';
+  let existing = null; try { existing = await readLocalFile(); } catch (e) {}
+  if (existing && existing.updatedAt && (!S.updatedAt || existing.updatedAt > S.updatedAt)
+    && confirm(`${h.name} already has tracker data that is newer (saved ${new Date(existing.updatedAt).toLocaleString('en-GB')}). Load it into this browser?\n\nCancel keeps this browser’s data and overwrites the file.`)) {
+    applyLocal(existing); toast(`Loaded your data from ${h.name}. Changes now save to it automatically.`); return;
+  }
+  await writeLocal(false, true); toast(`Changes now save to ${h.name} automatically`);
 }
 async function reconnectLocal() {
   if (!localHandle) return pickLocalFile();
-  if ((await localHandle.requestPermission({ mode: 'readwrite' })) === 'granted') { localState = 'on'; await writeLocal(true); renderMain(); }
+  if ((await localHandle.requestPermission({ mode: 'readwrite' })) !== 'granted') { localState = 'paused'; renderSync(); return; }
+  localState = 'on'; renderSync();
+  await localCheck();
+  if (lsync.phase === 'conflict') return localResolve();
+  if (localDirty()) await writeLocal(true, false).catch(e => { if (e.conflict) { lsync.phase = 'conflict'; return localResolve(); } throw e; });
+  else toast(`${localHandle.name} is up to date`);
 }
-async function writeLocal(loud) {
+async function localResolve() {
   if (!localHandle) return;
-  if ((await localHandle.queryPermission({ mode: 'readwrite' })) !== 'granted') { localState = 'paused'; renderSide(); return; }
-  const w = await localHandle.createWritable(); await w.write(backupJSON()); await w.close();
-  S.settings.localLast = new Date().toISOString(); save({ quiet: true }); renderSide();
-  if (loud) toast(`Backed up to ${localHandle.name}`);
+  if ((await localHandle.queryPermission({ mode: 'readwrite' })) !== 'granted' && (await localHandle.requestPermission({ mode: 'readwrite' })) !== 'granted') return;
+  localState = 'on';
+  const cur = await readLocalFile();
+  if (!cur) { lsync.phase = 'idle'; return writeLocal(true, true); }
+  if (confirm(`${localHandle.name} has changes saved ${new Date(cur.updatedAt).toLocaleString('en-GB')} (from another device or tab), and this browser also has changes that aren’t in the file yet.\n\nOK: use the file’s version (a copy of this browser’s version is downloaded first, just in case)\nCancel: keep this browser’s version and overwrite the file`)) {
+    exportBackup('iia-tracker-this-browser-before-file-load');
+    applyLocal(cur); toast(`Loaded ${localHandle.name}`);
+  } else { lsync.phase = 'idle'; await writeLocal(true, true); }
+}
+async function stopLocal() {
+  if (!confirm(`Stop saving to ${localHandle.name}? The file itself is kept.`)) return;
+  clearTimeout(lsync.timer); localHandle = null; localState = 'off'; lsync.phase = 'idle';
+  await idbDel('localHandle').catch(() => {});
+  S.settings.localSyncedVersion = ''; save({ quiet: true }); toast('Stopped saving to the backup file');
+}
+function localInfo() {
+  if (!localHandle) return null;
+  const dirty = localDirty();
+  if (lsync.phase === 'conflict') return { k: 'err', text: 'File and this browser both changed. Click to choose', act: 'local-resolve' };
+  if (localState !== 'on') return { k: 'warn', text: dirty ? 'Changes waiting. Click to allow saving' : 'Click to allow saving', act: 'local-reconnect' };
+  if (lsync.phase === 'saving') return { k: 'busy', text: 'Saving…' };
+  if (lsync.phase === 'error') return { k: 'err', text: `Saving failed (${lsync.error}). Retrying`, act: 'local-reconnect' };
+  if (dirty) return S.settings.localAuto === false ? { k: 'warn', text: 'Changes not saved (auto-save off)', act: 'local-reconnect' } : { k: 'busy', text: 'Saving…' };
+  return { k: 'ok', text: `Saved${S.settings.localLast ? ', ' + ago(S.settings.localLast) : ''}`, act: 'local-reconnect' };
 }
 async function initLocal() {
   if (!fsSupported) return;
@@ -829,6 +945,7 @@ async function initLocal() {
     if (localHandle) localState = (await localHandle.queryPermission({ mode: 'readwrite' })) === 'granted' ? 'on' : 'paused';
   } catch (e) { localHandle = null; }
   renderSide();
+  if (localOn()) { await localCheck(); scheduleLocal(600); }
 }
 
 /* =========================================================
@@ -905,7 +1022,10 @@ async function gdPush(force) {
       else if (!force) {
         const base = S.settings.gdRemoteMod;
         const ours = base ? meta.modifiedTime === base : S.settings.gdLast && new Date(meta.modifiedTime) <= new Date(new Date(S.settings.gdLast).getTime() + 120000);
-        if (!ours) throw Object.assign(new Error('Drive has newer changes'), { conflict: true });
+        if (!ours) {
+          const remote = await gdDownload(id);   // same data saved elsewhere (e.g. loaded from the backup file)? then it isn't a clash
+          if (!(remote && remote.updatedAt && (remote.updatedAt === S.updatedAt || remote.updatedAt <= (S.settings.gdSyncedVersion || '')))) throw Object.assign(new Error('Drive has newer changes'), { conflict: true });
+        }
       }
     }
     if (!id) {
@@ -921,14 +1041,9 @@ async function gdPush(force) {
     sync.phase = 'idle'; sync.error = ''; sync.retry = 0;
   } finally { sync.inflight = false; renderSync(); }
 }
-/* Replace this browser's data with Drive's, keeping device-specific settings. */
 function applyRemote(remote, mod) {
-  const keepKeys = ['gdClientId', 'gdFileId', 'gdConnected', 'gdEmail', 'gdAuto', 'localLast', 'exportLast'];
-  const keep = Object.fromEntries(keepKeys.map(k => [k, S.settings[k]])), ui = S.ui;
-  S = migrate(remote);
-  Object.assign(S.settings, keep, { gdRemoteMod: mod, gdSyncedVersion: S.updatedAt, gdLast: new Date().toISOString() });
-  if (S.courses[ui.course] || ui.view !== 'course') S.ui = ui;
-  save({ quiet: true }); sync.phase = 'idle'; render();
+  sync.phase = 'idle';
+  applyData(remote, st => Object.assign(st, { gdRemoteMod: mod, gdSyncedVersion: remote.updatedAt, gdLast: new Date().toISOString() }));
 }
 /* Pull newer Drive data if this browser is clean; flag a conflict if both changed. */
 async function gdCheckRemote() {
@@ -941,9 +1056,10 @@ async function gdCheckRemote() {
       if (!S.settings.gdRemoteMod && !driveDirty()) { S.settings.gdRemoteMod = meta.modifiedTime; save({ quiet: true }); }
       return;
     }
-    if (driveDirty()) { sync.phase = 'conflict'; return; }
     sync.phase = 'downloading'; renderSync();
     const remote = await gdDownload(id);
+    if (remote && remote.updatedAt === S.updatedAt) { Object.assign(S.settings, { gdRemoteMod: meta.modifiedTime, gdSyncedVersion: S.updatedAt }); save({ quiet: true }); return; }
+    if (driveDirty()) { sync.phase = 'conflict'; return; }
     if (remote && remote.courses) { applyRemote(remote, meta.modifiedTime); toast('Loaded newer changes from Google Drive (saved on another device)'); }
   } catch (e) { sync.phase = 'error'; sync.error = e.message; }
   finally { sync.inflight = false; if (sync.phase === 'downloading') sync.phase = 'idle'; renderSync(); }
@@ -1023,23 +1139,23 @@ function syncInfo() {
   if (dirty) return s.gdAuto ? { k: 'busy', text: 'Saving to Drive…' } : { k: 'warn', text: 'Changes not on Drive (auto-sync off)', act: 'gd-sync' };
   return { k: 'ok', text: `Synced to Drive${s.gdLast ? ', ' + ago(s.gdLast) : ''}`, act: 'gd-sync' };
 }
+function chip(i, label) {
+  const full = label === 'Backup file' && localHandle ? `${label} (${localHandle.name})` : label;
+  return `<button class="sync-chip k-${i.k}" data-act="sync-chip" data-to="${i.act || ''}" title="${esc(full + ': ' + i.text)}"><i></i><span><small>${esc(label)}</small>${esc(i.text)}</span></button>`;
+}
 function renderSync() {
-  const i = syncInfo();
-  const html = `<button class="sync-chip k-${i.k}" data-act="sync-chip" data-to="${i.act || ''}" title="${esc(i.text)}"><i></i><span>${esc(i.text)}</span></button>`;
+  const d = syncInfo(), l = localInfo();
+  const parts = [];
+  if (l) parts.push(chip(l, 'Backup file'));
+  if (S.settings.gdClientId || !l) parts.push(chip(d, 'Google Drive'));
   const a = $('#sync-side'), b = $('#sync-float');
-  if (a) a.innerHTML = html;
-  if (b) b.innerHTML = i.k === 'off' && !S.settings.gdClientId ? '' : html;
-  const st = $('#gd-status'); if (st) st.innerHTML = `<span class="sync-dot k-${i.k}"></span>${esc(i.text)}`;
+  if (a) a.innerHTML = parts.join('');
+  if (b) b.innerHTML = [l && chip(l, 'Backup file'), S.settings.gdClientId && chip(d, 'Google Drive')].filter(Boolean).join('');
+  const st = $('#gd-status'); if (st) st.innerHTML = `<span class="sync-dot k-${d.k}"></span>${esc(d.text)}`;
+  const ls = $('#local-status'); if (ls) ls.innerHTML = l ? `<span class="sync-dot k-${l.k}"></span>${esc(localHandle.name)}: ${esc(l.text)}` : '';
 }
 
-let bkT;
-function queueBackups() {
-  clearTimeout(bkT);
-  bkT = setTimeout(async () => {
-    try { if (localHandle && localState === 'on') await writeLocal(false); } catch (e) { localState = 'paused'; renderSide(); }
-  }, 2000);
-  scheduleDrive(2000);
-}
+function queueBackups() { scheduleLocal(1500); scheduleDrive(2000); }
 
 /* =========================================================
    Rendering
@@ -1067,7 +1183,7 @@ function renderSide() {
   }).join('') || `<p class="side-empty">Drop a lecture timetable (.ics) anywhere to add your first course.</p>`;
   const s = S.settings, lines = [];
   lines.push(`<div class="row"><span>This browser</span><span>${S.updatedAt ? 'saved' : '—'}</span></div>`);
-  if (localHandle) lines.push(`<div class="row"><span>Local file</span><span class="${localState === 'on' ? '' : 'warn'}">${localState === 'on' ? (ago(s.localLast) || 'on') : 'allow on click'}</span></div>`);
+
 
   if (!localHandle && !s.gdLast && !s.exportLast && S.order.length) lines.push(`<div class="warn" style="margin-top:6px">No backup yet</div>`);
   $('#side-foot').innerHTML = `<div id="sync-side"></div>` + lines.join('');
@@ -1326,9 +1442,12 @@ function settingsView() {
       <h2>Backups</h2>
       <p class="muted">Everything is saved in this browser automatically. Keep at least one copy elsewhere.</p>
       <h3 style="margin-top:16px">Local file</h3>
-      ${fsSupported ? `<p class="muted">Pick a file once (for example in a folder that syncs to OneDrive or iCloud) and every change is written to it.</p>
-        <div class="btn-row">${localHandle ? `<button class="btn" data-act="local-reconnect">${localState === 'on' ? 'Back up now' : 'Reconnect backup file'}</button><button class="btn" data-act="local-pick">Choose a different file…</button>` : `<button class="btn primary" data-act="local-pick">Choose backup file…</button>`}</div>
-        ${localHandle ? `<p class="status-line">Writing to ${esc(localHandle.name)}${s.localLast ? `, last ${ago(s.localLast)}` : ''}${localState !== 'on' ? '. Paused: click anywhere in the app and Chrome will ask to allow access again. Choose “Allow on every visit” and it won’t ask after future refreshes.' : ''}</p>` : ''}`
+      ${fsSupported ? `<p class="muted">Choose a file once, ideally in a folder that syncs (OneDrive, iCloud Drive, Dropbox). Every change is saved to it about 1.5 seconds later. If the file is updated from another device, newer data is loaded when you come back to this tab.</p>
+        ${localHandle ? `<p class="status-line" id="local-status"></p>
+        <label class="chk"><input type="checkbox" data-f="set-localauto" ${s.localAuto !== false ? 'checked' : ''}> Save to the file automatically after every change</label>
+        <div class="btn-row"><button class="btn primary" data-act="local-reconnect">${localState === 'on' ? 'Save now' : 'Allow access to file'}</button><button class="btn" data-act="local-pick">Choose a different file…</button><button class="btn" data-act="local-stop">Stop</button></div>
+        ${localState !== 'on' ? '<p class="status-line">After a restart Chrome asks again before the app can write to the file. Choose “Allow on every visit” and it won’t ask after future refreshes.</p>' : ''}`
+        : `<div class="btn-row"><button class="btn primary" data-act="local-pick">Choose backup file…</button></div>`}`
         : `<p class="muted">Automatic file backup needs Chrome or Edge. In this browser, download a copy instead.</p>`}
       <div class="btn-row"><button class="btn" data-act="export">Download backup (.json)</button><button class="btn" data-act="pick-file">Restore from file…</button></div>
       ${s.exportLast ? `<p class="status-line">Last downloaded ${ago(s.exportLast)}.</p>` : ''}
@@ -1439,7 +1558,9 @@ async function act(a, d) {
     }
     case 'export': return exportBackup();
     case 'local-pick': await pickLocalFile(); return render();
-    case 'local-reconnect': await reconnectLocal(); return render();
+    case 'local-reconnect': try { await reconnectLocal(); } catch (e) { toast(e.message, 'err'); } return render();
+    case 'local-resolve': try { await localResolve(); } catch (e) { toast(e.message, 'err'); } return render();
+    case 'local-stop': await stopLocal(); return render();
     case 'gd-connect': try { await gdConnect(); } catch (e) { toast(e.message, 'err'); } return render();
     case 'gd-sync': try { await gdSyncNow(); } catch (e) { toast(e.message, 'err'); } return render();
     case 'gd-resolve': try { await gdResolve(); } catch (e) { toast(e.message, 'err'); } return render();
@@ -1517,6 +1638,7 @@ function field(f, el, ev) {
       S.settings.intervals = iv; save(); return render();
     }
     case 'set-gdid': S.settings.gdClientId = el.value.trim(); gdClient = null; save(); return render();
+    case 'set-localauto': S.settings.localAuto = el.checked; save({ quiet: true }); if (el.checked) scheduleLocal(300); return renderSync();
     case 'set-gdauto': S.settings.gdAuto = el.checked; save({ quiet: true }); if (el.checked) scheduleDrive(500); return renderSync();
   }
 }
@@ -1590,10 +1712,10 @@ document.addEventListener('click', e => {
   if (Date.now() - lastRenew < 120000) return;
   if (localHandle && localState === 'paused') {
     lastRenew = Date.now();
-    localHandle.requestPermission({ mode: 'readwrite' }).then(p => {
+    localHandle.requestPermission({ mode: 'readwrite' }).then(async p => {
       if (p !== 'granted') return;
-      localState = 'on'; renderSide(); if (S.ui.view === 'settings') renderMain();
-      if (needsSync(S.settings.localLast)) writeLocal(false).catch(() => {});
+      localState = 'on'; renderSync(); if (S.ui.view === 'settings') renderMain();
+      await localCheck(); scheduleLocal(300);
     }).catch(() => {});
     return;
   }
@@ -1617,8 +1739,13 @@ window.addEventListener('storage', e => {
 window.addEventListener('online', () => { renderSync(); gdCheckRemote().then(() => scheduleDrive(500)); });
 window.addEventListener('offline', renderSync);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { if (driveDirty() && gdValid()) { clearTimeout(sync.timer); runDriveSync(); } }
-  else gdCheckRemote().then(() => scheduleDrive(500));
+  if (document.visibilityState === 'hidden') {
+    if (localDirty() && localOn()) { clearTimeout(lsync.timer); runLocalSync(); }
+    if (driveDirty() && gdValid()) { clearTimeout(sync.timer); runDriveSync(); }
+  } else {
+    localCheck().then(() => scheduleLocal(400));
+    gdCheckRemote().then(() => scheduleDrive(500));
+  }
 });
 
 render();
@@ -1628,7 +1755,7 @@ if (driveOn()) {
   if (gdValid()) gdCheckRemote().then(() => scheduleDrive(800));
 }
 setInterval(() => { renderSide(); }, 60000);
-setInterval(() => { if (document.visibilityState === 'visible') gdCheckRemote(); }, 5 * 60000);
+setInterval(() => { if (document.visibilityState === 'visible') { gdCheckRemote(); localCheck(); } }, 5 * 60000);
 </script>
 </body>
 </html>

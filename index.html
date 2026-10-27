@@ -75,6 +75,11 @@ button,input,select,textarea{font:inherit;color:inherit}
 .sync-chip.k-err{border-color:#F0716A}
 @keyframes pulse{from{opacity:.35}to{opacity:1}}
 .sync-float{display:none}
+.bad-id{color:var(--late)!important}
+.setup-other{margin:4px 0 12px;border:1px solid var(--rule);border-radius:4px}
+.setup-other summary{cursor:pointer;padding:9px 12px;font-weight:600;font-size:.9rem}
+.setup-in{display:flex;gap:16px;align-items:flex-start;padding:4px 12px 12px;flex-wrap:wrap}
+.setup-qr{background:#fff;padding:8px;border-radius:4px;line-height:0;min-width:156px;min-height:156px}
 .side-foot .ver{margin-top:8px;font-size:.72rem;opacity:.7}
 .update-bar{position:fixed;top:calc(12px + env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);z-index:70;background:var(--blue);color:#fff;border-radius:4px;padding:8px 10px 8px 16px;display:flex;gap:12px;align-items:center;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:.9rem}
 .update-bar button{background:#fff;color:var(--blue);border:0;border-radius:3px;padding:5px 12px;font-weight:600;cursor:pointer}
@@ -331,7 +336,7 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
 
 <script>
 'use strict';
-const APP_VERSION = '2026-10-27.8';
+const APP_VERSION = '2026-10-27.9';
 /* =========================================================
    Utilities
    ========================================================= */
@@ -411,6 +416,7 @@ function fixCourse(c) {
 }
 function migrate(s) {
   const d = DEFAULT_STATE();
+  if (s.settings && s.settings.gdClientId) s.settings.gdClientId = String(s.settings.gdClientId).replace(/[\s\u200B-\u200D\u2060\uFEFF"'`<>]/g, '');
   if (s.settings && s.settings.gdConnected === undefined && s.settings.gdLast) s.settings.gdConnected = true;
   if (s.settings && s.settings.localSyncedVersion === undefined && s.settings.localLast && s.updatedAt && s.updatedAt <= s.settings.localLast) s.settings.localSyncedVersion = s.updatedAt;
   if (s.settings && s.settings.gdSyncedVersion === undefined && s.settings.gdLast && s.updatedAt && s.updatedAt <= s.settings.gdLast) s.settings.gdSyncedVersion = s.updatedAt;
@@ -1119,8 +1125,13 @@ function gdLoadToken() { try { const t = JSON.parse(localStorage.getItem(GD_TOKE
 gdLoadToken();
 function gdStoreToken() { try { gdToken ? localStorage.setItem(GD_TOKEN_KEY, JSON.stringify({ token: gdToken, exp: gdExp })) : localStorage.removeItem(GD_TOKEN_KEY); } catch (e) {} }
 
+/* Pasting on a phone often drags in spaces, line breaks, invisible characters or quotes */
+const cleanClientId = v => String(v || '').replace(/[\s\u200B-\u200D\u2060\uFEFF"'`<>]/g, '');
+const validClientId = v => /^\d+-[a-z0-9_]+\.apps\.googleusercontent\.com$/i.test(v || '');
+const setupLink = () => location.origin + location.pathname + '#setup=' + encodeURIComponent(S.settings.gdClientId);
 async function gdInit() {
   if (!S.settings.gdClientId) throw new Error('Add your Google OAuth client ID in Backup & settings first.');
+  if (!validClientId(S.settings.gdClientId)) throw new Error('The client ID in Backup & settings isn’t complete. It should look like 123456789012-abc123.apps.googleusercontent.com. The easiest fix: open the setup link or scan the QR code from your laptop.');
   await loadScript('https://accounts.google.com/gsi/client');
   gdClient ||= google.accounts.oauth2.initTokenClient({
     client_id: S.settings.gdClientId, scope: 'https://www.googleapis.com/auth/drive.file', login_hint: S.settings.gdEmail || undefined,
@@ -1347,6 +1358,11 @@ function renderMain() {
   else if (S.ui.view === 'course' && cur()) v.innerHTML = courseView(cur());
   else v.innerHTML = overviewView();
   renderSync();
+  const qr = $('#setup-qr');
+  if (qr) loadScript('https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js').then(() => {
+    if (!document.body.contains(qr) || qr.childElementCount) return;
+    new QRCode(qr, { text: setupLink(), width: 140, height: 140, colorDark: '#000000', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M });
+  }).catch(() => { qr.textContent = 'QR code unavailable offline. Use “Copy setup link”.'; qr.style.lineHeight = '1.4'; });
 }
 
 /* ---------- Overview ---------- */
@@ -1628,8 +1644,13 @@ function settingsView() {
       <p class="status-line">PDFs are kept in this browser only. After restoring on another device, drop them in again to reattach.</p>
 
       <h3 style="margin-top:22px">Google Drive</h3>
-      <label class="field"><span>OAuth client ID</span><input type="text" data-f="set-gdid" value="${esc(s.gdClientId)}" placeholder="1234-abc.apps.googleusercontent.com" spellcheck="false">
+      <label class="field"><span>OAuth client ID</span><input type="text" data-f="set-gdid" value="${esc(s.gdClientId)}" placeholder="123456789012-abc123.apps.googleusercontent.com" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off">
+        ${s.gdClientId && !validClientId(s.gdClientId) ? `<small class="bad-id">This doesn’t look like a complete client ID (${s.gdClientId.length} characters). It should be digits, a dash, letters and numbers, then <b>.apps.googleusercontent.com</b>. Google answers an incomplete one with “Error 401: invalid_client”.</small>` : ''}
         <small>Create a Web client ID in Google Cloud Console and add <b>${esc(orig)}</b> as an authorised JavaScript origin. The README has the steps.</small></label>
+      ${validClientId(s.gdClientId) && /^https?:/.test(location.protocol) ? `<details class="setup-other"><summary>Set up your phone or another device</summary>
+        <div class="setup-in"><div id="setup-qr" class="setup-qr" aria-label="QR code with a setup link"></div>
+        <div><p class="muted" style="margin-top:0">Scan this with the phone’s camera, or send yourself the link. Opening it fills in the client ID on that device, so nothing needs typing. Then press <b>Connect Google Drive</b> there.</p>
+        <div class="btn-row"><button class="btn" data-act="copy-setup">Copy setup link</button></div></div></div></details>` : ''}
       <label class="chk"><input type="checkbox" data-f="set-gdauto" ${s.gdAuto ? 'checked' : ''}> Sync to Drive automatically after every change</label>
       <div class="btn-row">
         ${s.gdConnected ? `<button class="btn primary" data-act="gd-sync">Sync now</button>` : `<button class="btn primary" data-act="gd-connect" ${s.gdClientId ? '' : 'disabled'}>Connect Google Drive</button>`}
@@ -1697,6 +1718,7 @@ async function act(a, d) {
     case 'qcycle': { const q = getQ(d), order = ['', 'green', 'yellow', 'red']; q.status = order[(order.indexOf(q.status) + 1) % 4]; if (q.status && !q.date) q.date = todayStr(); break; }
     case 'nq': { const p = getP(d); if (!resizeQs(p, p.questions.length + +d.d)) return; break; }
     case 'pdf': return openPdf(d.key);
+    case 'copy-setup': try { await navigator.clipboard.writeText(setupLink()); toast('Setup link copied. Send it to your phone and open it there.'); } catch (e) { prompt('Copy this link:', setupLink()); } return;
     case 'reset-unlock': getP(d).questions.forEach(q => { q.unlock = null; }); toast('All questions now follow the guide'); break;
     case 'apply-sched': { const ta = $('textarea[data-f="schedtext"]'); return applyScheduleText(c, ta ? ta.value : c.scheduleText); }
     case 'add-paper': {
@@ -1837,7 +1859,12 @@ function field(f, el, ev) {
       if (!iv.length) { toast('Enter numbers of days, e.g. 1, 7, 21', 'err'); return render(); }
       S.settings.intervals = iv; save(); return render();
     }
-    case 'set-gdid': S.settings.gdClientId = el.value.trim(); gdClient = null; save(); return render();
+    case 'set-gdid': {
+      const v = cleanClientId(el.value);
+      if (v !== S.settings.gdClientId) { S.settings.gdClientId = v; gdClient = null; save(); }
+      if (v && !validClientId(v)) toast('That client ID looks incomplete. Copy it again in full, or use the setup link from your laptop.', 'err');
+      return render();
+    }
     case 'set-localauto': S.settings.localAuto = el.checked; save({ quiet: true }); if (el.checked) scheduleLocal(300); return renderSync();
     case 'set-gdauto': S.settings.gdAuto = el.checked; save({ quiet: true }); if (el.checked) scheduleDrive(500); return renderSync();
   }
@@ -1975,6 +2002,15 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+(function applySetupLink() {
+  const m = location.hash.match(/^#setup=(.+)$/); if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  const id = cleanClientId(decodeURIComponent(m[1]));
+  if (!validClientId(id)) { setTimeout(() => toast('That setup link is incomplete. Copy it again from the other device.', 'err'), 300); return; }
+  if (S.settings.gdClientId && S.settings.gdClientId !== id && !confirm('Replace the Google client ID on this device with the one from the setup link?')) return;
+  S.settings.gdClientId = id; gdClient = null; S.ui.view = 'settings'; save({ quiet: true });
+  setTimeout(() => toast('Client ID added. Now press Connect Google Drive.'), 300);
+})();
 render();
 initLocal();
 checkForUpdate();

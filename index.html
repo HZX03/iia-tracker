@@ -290,6 +290,21 @@ tr.part-row th.rowh{padding-left:28px;background:color-mix(in srgb,var(--paper) 
 .part-ctl{display:inline-flex;gap:4px}
 .qcell.small.wide{min-width:62px;padding:0 6px;font-size:.95rem}
 .pind{display:inline-block}
+:root{--flag:#D9730D}
+.c-flag{white-space:nowrap;text-align:center}
+.flag-btn{background:none;border:1px solid transparent;border-radius:3px;padding:4px 6px;cursor:pointer;color:var(--ink-2);opacity:.45;line-height:0}
+.flag-btn:hover{opacity:1;border-color:var(--rule)}
+.flag-btn.on{color:var(--flag);opacity:1}
+@media (hover:none){.flag-btn{opacity:.7}}
+.rev-at{display:block;font-size:.68rem;color:var(--ink-2)}
+.flag-n{font-size:.72rem;color:var(--flag);font-weight:600;margin-left:2px}
+tr.flagged>th.rowh{box-shadow:inset 4px 0 0 var(--flag)}
+.tab-flag{display:inline-flex;align-items:center;gap:2px;color:var(--flag);font-size:.8rem;font-family:var(--body)}
+.tab-flag svg{width:12px;height:12px}
+.fchip svg{width:12px;height:12px;color:var(--flag)}
+.flag-title{display:inline-flex;align-items:center;gap:8px;font-family:var(--cond);font-weight:700;font-size:1.6rem;color:var(--ink)}
+.flag-title svg{width:22px;height:22px;color:var(--flag)}
+.flagged-paper{border-left:4px solid var(--flag)}
 tr.part-row.d2 th.rowh{padding-left:52px}
 tr.part-row.d2>*{background:color-mix(in srgb,var(--paper) 80%,var(--sheet))}
 tr.part-row.d2 th.rowh{background:color-mix(in srgb,var(--paper) 80%,var(--sheet))}
@@ -381,7 +396,7 @@ tr.part-row.d2 .qcell.part{min-width:40px;height:26px;font-size:.9rem;font-weigh
 
 <script>
 'use strict';
-const APP_VERSION = '2026-10-27.14';
+const APP_VERSION = '2026-10-27.15';
 /* =========================================================
    Utilities
    ========================================================= */
@@ -781,6 +796,12 @@ function applyFound(q, spec) {
   spec.forEach((sub, k) => { if (sub >= 2 && !hasKids(q.parts[k])) { setParts(q.parts[k], sub, 2); n++; } });
   syncParts(q); return n;
 }
+/* Review flags can sit on a question, a part or a sub-part */
+const allNodes = (node, path = '') => [{ node, path }, ...(hasKids(node) ? node.parts.flatMap((x, k) => allNodes(x, path === '' ? String(k) : `${path}.${k}`)) : [])];
+const flagsIn = node => allNodes(node).filter(n => n.node.flag).length;
+const paperFlags = p => p.questions.reduce((n, q) => n + flagsIn(q), 0);
+const FLAG = on => `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M3.5 1.5v13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M4.2 2.2h8.3l-2.2 3.2 2.2 3.2H4.2z" fill="${on ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>`;
+const flagBtn = (node, attrs, name) => `<button class="flag-btn${node.flag ? ' on' : ''}" data-act="flag" ${attrs} aria-pressed="${!!node.flag}" title="${node.flag ? `Flagged for review${node.flagAt ? ' on ' + fmtShort(parseYmd(node.flagAt)) : ''}. Click to remove` : `Flag ${name} for review`}">${FLAG(node.flag)}</button>${node.reviewedAt && !node.flag ? `<span class="rev-at" title="Last reviewed">${fmtShort(parseYmd(node.reviewedAt))}</span>` : ''}`;
 const leaves = (node, path = '') => hasKids(node) ? node.parts.flatMap((x, k) => leaves(x, path === '' ? String(k) : `${path}.${k}`)) : [{ node, path }];
 function findPaperNum(s, strict) {
   s = String(s || '').replace(new RegExp(CODE_RE.source, 'gi'), ' ');   // a course code like 3A3 is never the paper number
@@ -1576,6 +1597,34 @@ function todoRows(p, isLocked, qst, want) {
   });
   return out;
 }
+function flaggedSection() {
+  let total = 0;
+  const html = S.order.map(code => {
+    const c = S.courses[code], papers = [];
+    [['paper', c.papers], ['trip', c.tripos]].forEach(([kind, list]) => list.forEach(p => {
+      const items = [];
+      p.questions.forEach((q, i) => allNodes(q).forEach(({ node, path }) => { if (node.flag) items.push({ q, i, node, path }); }));
+      if (items.length) papers.push({ p, kind, items });
+    }));
+    if (!papers.length) return '';
+    return papers.map(({ p, kind, items }) => {
+      total += items.length;
+      const goto = `data-act="goto" data-code="${esc(code)}" data-tab="${kind === 'trip' ? 'tripos' : 'examples'}" data-pid="${p.id}"`;
+      return `<div class="todo-paper flagged-paper"><div class="todo-ph"><h3>${esc(code)} ${kind === 'trip' ? 'tripos ' + esc(p.year) : 'examples paper ' + esc(p.num)}</h3><span class="muted">${items.length} flagged</span><span class="grow"></span><button class="mini" ${goto}>Open paper</button></div>
+        <ul class="todo-list">${items.map(({ q, i, node, path }) => {
+          const locked = kind === 'paper' && !isUnlocked(c, effUnlock(c, p, i));
+          const st = node.status || (locked ? 'grey' : 'white');
+          const dd = `data-code="${esc(code)}" data-kind="${kind}" data-pid="${p.id}" data-q="${i}"${path ? ` data-part="${path}"` : ''}`;
+          const lab = path ? fullLabel(i, q, path) : `Q${i + 1}`;
+          const com = [q.comment, ...nodeTrail(q, path).map(n => n.comment)].filter(Boolean).join('. ');
+          return `<li><span class="qcell st-${st} small${path ? ' wide' : ''}">${lab}</span>
+            <span class="todo-info"><span>${ST_LABEL[st][0].toUpperCase() + ST_LABEL[st].slice(1)}${node.flagAt ? `, flagged ${fmtShort(parseYmd(node.flagAt))}` : ''}${node.reviewedAt ? `, last reviewed ${fmtShort(parseYmd(node.reviewedAt))}` : ''}</span>${com ? `<span class="muted todo-com">${esc(com)}</span>` : ''}</span>
+            <span class="part-ctl"><button class="btn" data-act="reviewed" ${dd} title="Clear the flag and record today as reviewed">Reviewed</button><button class="mini quiet" data-act="flag" ${dd}>Unflag</button></span></li>`;
+        }).join('')}</ul></div>`;
+    }).join('');
+  }).join('');
+  return { html, total };
+}
 function todoView() {
   const f = S.ui.todoF ||= { white: true, red: false, yellow: false, tripos: false };
   const want = st => (st === 'white' && f.white) || (st === 'red' && f.red) || (st === 'yellow' && f.yellow);
@@ -1609,10 +1658,12 @@ function todoView() {
         }).join('')}</ul></div>`;
       }).join('')}</section>`;
   }).join('');
-  const chip = (k, label, cls) => `<button class="fchip ${f[k] ? 'on' : ''}" data-act="todo-f" data-k="${k}" aria-pressed="${!!f[k]}">${cls ? `<i class="st-${cls}"></i>` : ''}${label}</button>`;
+  const chip = (k, label, cls) => { const on = k === 'flag' ? f.flag !== false : !!f[k]; return `<button class="fchip ${on ? 'on' : ''}" data-act="todo-f" data-k="${k}" aria-pressed="${on}">${cls === 'flag' ? FLAG(true) : cls ? `<i class="st-${cls}"></i>` : ''}${label}</button>`; };
+  const fl = flaggedSection(), showFlags = f.flag !== false && fl.total;
   return `<h1 class="ov-title">To do</h1>
-  <div class="toolbar"><span class="muted">Show</span>${chip('white', 'Ready, not done', 'white')}${chip('red', 'Can’t do', 'red')}${chip('yellow', 'Query', 'yellow')}${chip('tripos', 'Include tripos papers')}<span class="grow"></span><span class="muted">${total} question${total === 1 ? '' : 's'}</span></div>
-  ${blocks || `<div class="empty"><h2>Nothing to do right now</h2><p class="muted">Questions appear here once they’re available and not yet marked done. Lecture dates, the question guide and “Make available” decide when that is.</p></div>`}
+  <div class="toolbar"><span class="muted">Show</span>${chip('white', 'Ready, not done', 'white')}${chip('red', 'Can’t do', 'red')}${chip('yellow', 'Query', 'yellow')}${chip('tripos', 'Include tripos papers')}${chip('flag', 'Flagged for review', 'flag')}<span class="grow"></span><span class="muted">${total} question${total === 1 ? '' : 's'}${fl.total ? `, ${fl.total} flagged` : ''}</span></div>
+  ${showFlags ? `<section class="todo-course"><h2><span class="flag-title">${FLAG(true)} Flagged for review</span><span class="muted">${fl.total}</span></h2>${fl.html}</section>` : ''}
+  ${blocks || (showFlags ? '' : `<div class="empty"><h2>Nothing to do right now</h2><p class="muted">Questions appear here once they’re available and not yet marked done. Lecture dates, the question guide and “Make available” decide when that is. Questions you flag for review appear here too.</p></div>`)}
   <p class="muted" style="font-size:.82rem;margin-top:14px">Marking a question here updates it on its paper too. Dates in red have been waiting two weeks or more.</p>`;
 }
 
@@ -1711,7 +1762,7 @@ function examplesTab(c) {
   ${sectionsPanel(c)}
   ${c.papers.length ? `<div class="subtabs" role="tablist">${c.papers.map(x => {
     const q = { green: 0, yellow: 0, red: 0, white: 0, grey: 0 }; x.questions.forEach((_, i) => q[qState(c, x, i)]++);
-    return `<button class="subtab ${p && x.id === p.id ? 'on' : ''}" data-act="paper" data-id="${x.id}">Paper ${esc(x.num)} ${x.questions.length ? stack(q) : ''}</button>`;
+    return `<button class="subtab ${p && x.id === p.id ? 'on' : ''}" data-act="paper" data-id="${x.id}">Paper ${esc(x.num)} ${x.questions.length ? stack(q) : ''}${paperFlags(x) ? `<span class="tab-flag" title="${paperFlags(x)} flagged for review">${FLAG(true)}${paperFlags(x)}</span>` : ''}</button>`;
   }).join('')}</div>` : ''}
   ${p ? paperView(c, p) : `<details class="sched" open>${schedBox(c)}</details>`}`;
 }
@@ -1766,13 +1817,14 @@ function qTable(c, p, kind) {
     const cell = kids
       ? `<button class="qcell part st-${pst}" data-act="q-toggle" ${pd} title="${open ? 'Hide' : 'Show'} the parts of ${name}">(${x.label})</button><button class="parts-tag" data-act="q-toggle" ${pd}>${open ? '▾' : '▸'} ${x.parts.length}</button>`
       : `<button class="qcell part st-${pst}" data-act="pcycle" ${pd} title="${name}: ${ST_LABEL[pst]}. Click to cycle">(${x.label})</button>${depth < MAX_DEPTH ? `<button class="parts-tag add" data-act="part-split" ${pd} title="Split ${name} into (i), (ii)…">+ (i), (ii)</button>` : ''}`;
-    let html = `<tr class="part-row d${depth}${kids ? ' has-parts' : ''}">
+    let html = `<tr class="part-row d${depth}${kids ? ' has-parts' : ''}${x.flag ? ' flagged' : ''}">
       <th scope="row" class="rowh qh"><span class="pind">${cell}</span></th>
       ${isP ? `<td class="c-unlock"><span class="hint">${locked ? 'not yet, as Q' + (i + 1) : 'as Q' + (i + 1)}</span></td>` : ''}
       <td>${kids ? summary(x, pd, locked, depth) : seg(x.status, 'ps', pd)}</td>
       <td>${kids ? (x.date ? `<span class="muted">${fmtShort(parseYmd(x.date))}</span>` : '') : `<input type="date" data-f="pdate" ${pd} value="${esc(x.date)}" aria-label="${name} date">`}</td>
       ${!isP ? '<td></td>' : ''}
       <td style="text-align:center">${kids ? '' : `<input type="checkbox" data-f="pcrib" ${pd} ${x.crib ? 'checked' : ''} aria-label="${name} checked against crib">`}</td>
+      <td class="c-flag">${flagBtn(x, pd, name)}</td>
       <td class="c-com"><textarea rows="1" data-f="pcom" ${pd} placeholder="Comment on (${x.label})" aria-label="${name} comment">${esc(x.comment)}</textarea></td></tr>`;
     if (open) html += partRows(q, i, x, cp, depth + 1, locked, qdd);
     return html;
@@ -1785,18 +1837,19 @@ function qTable(c, p, kind) {
     const qcell = kids
       ? `<button class="qcell st-${st}" data-act="q-toggle" ${dd} title="${open ? 'Hide' : 'Show'} parts">Q${i + 1}</button><button class="parts-tag" data-act="q-toggle" ${dd}>${open ? '▾' : '▸'} ${q.parts.length} parts</button>`
       : `<button class="qcell st-${st}" data-act="qcycle" ${dd} title="${ST_LABEL[st]}: click to cycle status">Q${i + 1}</button><button class="parts-tag add" data-act="part-split" ${dd} title="Split Q${i + 1} into parts (a), (b)…">+ parts</button>`;
-    let html = `<tr class="${kids ? 'has-parts' : ''}">
+    let html = `<tr class="${kids ? 'has-parts' : ''}${q.flag ? ' flagged' : ''}">
       <th scope="row" class="rowh qh">${qcell}</th>
       ${isP ? unlockCell(c, p, i, dd) : ''}
       <td>${kids ? summary(q, dd, locked, 0) : seg(q.status, 'qs', dd)}</td>
       <td>${kids ? (q.date ? `<span class="muted">${fmtShort(parseYmd(q.date))}</span>` : '') : `<input type="date" data-f="qdate" ${dd} value="${esc(q.date)}" aria-label="Q${i + 1} date">`}</td>
       ${!isP ? `<td class="c-time"><input type="number" min="0" data-f="qtime" ${dd} value="${esc(q.time)}" placeholder="min" aria-label="Q${i + 1} minutes taken"></td>` : ''}
       <td style="text-align:center">${kids ? '' : `<input type="checkbox" data-f="qcrib" ${dd} ${q.crib ? 'checked' : ''} aria-label="Q${i + 1} checked against crib">`}</td>
+      <td class="c-flag">${flagBtn(q, dd, 'Q' + (i + 1))}${kids && !open && flagsIn(q) - (q.flag ? 1 : 0) ? `<span class="flag-n" title="Flagged parts inside">+${flagsIn(q) - (q.flag ? 1 : 0)}</span>` : ''}</td>
       <td class="c-com"><textarea rows="1" data-f="qcom" ${dd} placeholder="${kids ? 'Comment on the whole question' : 'Comment'}" aria-label="Q${i + 1} comment">${esc(q.comment)}</textarea></td></tr>`;
     if (open) html += partRows(q, i, q, '', 1, locked, dd);
     return html;
   }).join('');
-  return `<div class="scroll"><table class="tbl"><thead><tr><th>Question</th>${isP ? '<th>Available after</th>' : ''}<th>Status</th><th>Date</th>${!isP ? '<th>Time</th>' : ''}<th>Crib</th><th>Comment</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  return `<div class="scroll"><table class="tbl"><thead><tr><th>Question</th>${isP ? '<th>Available after</th>' : ''}<th>Status</th><th>Date</th>${!isP ? '<th>Time</th>' : ''}<th>Crib</th><th title="Flag for review">Review</th><th>Comment</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function moveSelect(c, dd) {
   if (S.order.length < 2) return '';
@@ -1839,7 +1892,7 @@ function triposTab(c) {
   </div>
   ${c.tripos.length ? `<div class="subtabs">${c.tripos.map(x => {
     const q = { green: 0, yellow: 0, red: 0, white: 0, grey: 0 }; x.questions.forEach(y => q[y.status || 'white']++);
-    return `<button class="subtab ${p && x.id === p.id ? 'on' : ''}" data-act="trip" data-id="${x.id}">${esc(x.year)} ${stack(q)}</button>`;
+    return `<button class="subtab ${p && x.id === p.id ? 'on' : ''}" data-act="trip" data-id="${x.id}">${esc(x.year)} ${stack(q)}${paperFlags(x) ? `<span class="tab-flag" title="${paperFlags(x)} flagged for review">${FLAG(true)}${paperFlags(x)}</span>` : ''}</button>`;
   }).join('')}</div>` : ''}
   ${p ? `<div class="paper-head"><h2 class="pnum-h">Tripos <input class="pnum pyear" data-f="tyear" ${dd} value="${esc(p.year)}" inputmode="numeric" aria-label="Year" title="Change the year"></h2>${moveSelect(c, dd)}<span style="flex:1"></span>
       <span class="nq">Questions <button class="icon" data-act="nq" ${dd} data-d="-1" aria-label="One fewer question">−</button><b>${p.questions.length}</b><button class="icon" data-act="nq" ${dd} data-d="1" aria-label="One more question">+</button></span>
@@ -1914,7 +1967,7 @@ function goCourse(code, tab) { S.ui.view = 'course'; S.ui.course = code; if (tab
 async function act(a, d) {
   const c = cur();
   switch (a) {
-    case 'todo-f': { const f = S.ui.todoF ||= { white: true, red: false, yellow: false, tripos: false }; f[d.k] = !f[d.k]; save({ quiet: true }); return render(); }
+    case 'todo-f': { const f = S.ui.todoF ||= { white: true, red: false, yellow: false, tripos: false }; f[d.k] = d.k === 'flag' ? f.flag === false : !f[d.k]; save({ quiet: true }); return render(); }
     case 'overview': case 'settings': case 'todo': S.ui.view = a; save({ quiet: true }); render(); window.scrollTo({ top: 0 }); return;
     case 'course': return goCourse(d.code);
     case 'goto': goCourse(d.code, d.tab); if (d.pid) { S.courses[d.code].activePaper = d.pid; render(); } return;
@@ -1947,6 +2000,15 @@ async function act(a, d) {
     case 'qs': { const q = getQ(d); setAll(q, d.s); syncParts(q); break; }
     case 'ps': { const q = getQ(d); setAll(getNode(q, d.part), d.s); syncParts(q); break; }
     case 'pcycle': { const q = getQ(d), x = getNode(q, d.part), order = ['', 'green', 'yellow', 'red']; x.status = order[(order.indexOf(x.status) + 1) % 4]; if (x.status && !x.date) x.date = todayStr(); syncParts(q); break; }
+    case 'flag': {
+      const q = getQ(d), x = getNode(q, d.part), name = fullLabel(+d.q, q, d.part);
+      x.flag = !x.flag; x.flagAt = x.flag ? todayStr() : '';
+      toast(x.flag ? `${name} flagged for review. It’s listed on the To do page.` : `${name} unflagged`); break;
+    }
+    case 'reviewed': {
+      const q = getQ(d), x = getNode(q, d.part);
+      x.flag = false; x.reviewedAt = todayStr(); toast(`${fullLabel(+d.q, q, d.part)} marked reviewed`); break;
+    }
     case 'q-toggle': { const x = getNode(getQ(d), d.part); x.collapsed = !x.collapsed; save({ quiet: true }); return render(); }
     case 'part-split': {
       const q = getQ(d), x = getNode(q, d.part), depth = pathDepth(d.part), name = fullLabel(+d.q, q, d.part);

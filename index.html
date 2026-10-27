@@ -62,6 +62,18 @@ button,input,select,textarea{font:inherit;color:inherit}
 .side-foot{margin-top:auto;padding:16px 22px 20px;border-top:1px solid rgba(255,255,255,.08);font-size:.8rem;color:var(--side-dim)}
 .side-foot .row{display:flex;justify-content:space-between;gap:8px}
 .side-foot .warn{color:#F6C76B}
+.sync-chip{display:flex;align-items:center;gap:8px;width:100%;text-align:left;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:4px;padding:8px 10px;margin-bottom:10px;color:var(--side-ink);cursor:pointer;font-size:.8rem;line-height:1.3}
+.sync-chip:hover{background:rgba(255,255,255,.11)}
+.sync-chip i,.sync-dot{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
+.sync-dot{margin-right:7px;vertical-align:0}
+.k-ok i,.sync-dot.k-ok{background:#5CC489}
+.k-busy i,.sync-dot.k-busy{background:#6FA3F0;animation:pulse 1s ease-in-out infinite alternate}
+.k-warn i,.sync-dot.k-warn{background:#F2C14E}
+.k-err i,.sync-dot.k-err{background:#F0716A}
+.k-off i,.sync-dot.k-off{background:#7D92AA}
+.sync-chip.k-err{border-color:#F0716A}
+@keyframes pulse{from{opacity:.35}to{opacity:1}}
+.sync-float{display:none}
 .side-add{margin:8px 18px 0;display:block;width:calc(100% - 36px);background:none;border:1px dashed rgba(255,255,255,.25);color:var(--side-ink);border-radius:4px;padding:8px;cursor:pointer;font-size:.85rem}
 .side-add:hover{border-color:rgba(255,255,255,.5)}
 
@@ -255,6 +267,9 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
   .course-btn .cc{font-size:1.4rem}
   .course-btn .cn,.course-btn .cbar{display:none}
   .ov-grid{grid-template-columns:1fr}
+  .sync-float{display:block;position:fixed;left:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:40;max-width:calc(100vw - 24px)}
+  .sync-float .sync-chip{background:var(--side);margin:0;box-shadow:0 4px 14px rgba(0,0,0,.2);width:auto}
+  .sync-float .sync-chip.k-ok span{display:none}
   main{padding-top:20px}
 }
 </style>
@@ -279,6 +294,7 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
 <input type="file" id="file-any" multiple hidden accept=".ics,.pdf,.json,.txt,image/*">
 <div class="drag-banner" id="drag-banner">Drop to import</div>
 <div class="toast-wrap" id="toasts" aria-live="polite"></div>
+<div class="sync-float" id="sync-float" aria-live="polite"></div>
 
 <script>
 'use strict';
@@ -358,6 +374,7 @@ function fixCourse(c) {
 function migrate(s) {
   const d = DEFAULT_STATE();
   if (s.settings && s.settings.gdConnected === undefined && s.settings.gdLast) s.settings.gdConnected = true;
+  if (s.settings && s.settings.gdSyncedVersion === undefined && s.settings.gdLast && s.updatedAt && s.updatedAt <= s.settings.gdLast) s.settings.gdSyncedVersion = s.updatedAt;
   s.settings = { ...d.settings, ...(s.settings || {}) };
   s.ui = { ...d.ui, ...(s.ui || {}) };
   s.courses ||= {}; s.order = (s.order || Object.keys(s.courses)).filter(k => s.courses[k]);
@@ -767,17 +784,18 @@ async function importSchedule(f) {
    ========================================================= */
 const BACKUP_NAME = 'iia-tripos-tracker-backup.json';
 const backupJSON = () => JSON.stringify({ ...S, exportedAt: new Date().toISOString(), app: 'iia-tripos-tracker' }, null, 1);
-function exportBackup() {
+function exportBackup(prefix) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([backupJSON()], { type: 'application/json' }));
-  a.download = `iia-tracker-${todayStr()}.json`; a.click();
+  a.download = `${typeof prefix === 'string' ? prefix : 'iia-tracker'}-${todayStr()}.json`; a.click();
+  if (typeof prefix === 'string') return;
   S.settings.exportLast = new Date().toISOString(); save({ quiet: true }); renderSide();
 }
 function restoreFrom(obj, source) {
   if (!obj || !obj.courses) throw new Error('This file is not a tracker backup.');
   const n = Object.keys(obj.courses).length;
   if (!confirm(`Replace everything in this browser with the backup from ${source} (${n} course${n === 1 ? '' : 's'}, saved ${obj.updatedAt ? new Date(obj.updatedAt).toLocaleString('en-GB') : 'unknown'})?`)) return false;
-  const keep = { gdClientId: S.settings.gdClientId, gdFileId: S.settings.gdFileId, gdConnected: S.settings.gdConnected, gdEmail: S.settings.gdEmail, gdAuto: S.settings.gdAuto };
+  const keep = Object.fromEntries(['gdClientId', 'gdFileId', 'gdConnected', 'gdEmail', 'gdAuto', 'gdRemoteMod', 'gdSyncedVersion', 'gdLast', 'localLast', 'exportLast'].map(k => [k, S.settings[k]]));
   S = migrate(obj); Object.assign(S.settings, keep);
   save(); render(); toast('Backup restored'); return true;
 }
@@ -813,13 +831,25 @@ async function initLocal() {
   renderSide();
 }
 
-/* Google Drive (drive.file scope: the app only sees files it created) */
+/* =========================================================
+   Google Drive sync (drive.file scope: the app only sees files it created)
+   - every change is pushed ~2 s later
+   - before each push, Drive is checked so another device's newer save is never overwritten
+   - on open / when the tab regains focus, newer Drive data is pulled in if this browser has no unsynced changes
+   ========================================================= */
 const GD_TOKEN_KEY = 'iia-tracker-gd-token';
-let gdToken = null, gdExp = 0, gdClient = null, gdPending = null, gdState = 'off';
-const gdValid = () => gdToken && Date.now() < gdExp - 60000;
-try { const t = JSON.parse(localStorage.getItem(GD_TOKEN_KEY) || 'null'); if (t && t.exp > Date.now() + 60000) { gdToken = t.token; gdExp = t.exp; gdState = 'on'; } } catch (e) {}
-function gdStoreToken() { try { gdToken ? localStorage.setItem(GD_TOKEN_KEY, JSON.stringify({ token: gdToken, exp: gdExp })) : localStorage.removeItem(GD_TOKEN_KEY); } catch (e) {} }
+const GD_API = 'https://www.googleapis.com/drive/v3/files', GD_UP = 'https://www.googleapis.com/upload/drive/v3/files';
+let gdToken = null, gdExp = 0, gdClient = null, gdPending = null;
+const sync = { phase: 'idle', error: '', timer: null, inflight: false, retry: 0 };
+const gdValid = () => !!gdToken && Date.now() < gdExp - 60000;
+const gdFresh = () => !!gdToken && Date.now() < gdExp - 10 * 60000;
+const driveOn = () => !!(S.settings.gdClientId && S.settings.gdConnected);
+const driveDirty = () => !!S.updatedAt && S.updatedAt !== S.settings.gdSyncedVersion;
 const needsSync = last => S.updatedAt && (!last || S.updatedAt > last);
+function gdLoadToken() { try { const t = JSON.parse(localStorage.getItem(GD_TOKEN_KEY) || 'null'); if (t && t.exp > Date.now() + 60000) { gdToken = t.token; gdExp = t.exp; } } catch (e) {} }
+gdLoadToken();
+function gdStoreToken() { try { gdToken ? localStorage.setItem(GD_TOKEN_KEY, JSON.stringify({ token: gdToken, exp: gdExp })) : localStorage.removeItem(GD_TOKEN_KEY); } catch (e) {} }
+
 async function gdInit() {
   if (!S.settings.gdClientId) throw new Error('Add your Google OAuth client ID in Backup & settings first.');
   await loadScript('https://accounts.google.com/gsi/client');
@@ -828,14 +858,16 @@ async function gdInit() {
     callback: r => gdPending && gdPending(r), error_callback: e => gdPending && gdPending({ error: e.type || 'popup_closed' })
   });
 }
-function gdAuth() {
+/* Must be called from a click (browsers only allow the Google popup after a user action). */
+function gdAuth(force) {
   return new Promise((res, rej) => {
-    if (gdValid()) return res(gdToken);
+    if (!force && gdValid()) return res(gdToken);
+    if (!gdClient) return rej(new Error('Google sign-in is still loading — try again in a second.'));
     gdPending = r => {
       gdPending = null;
-      if (r.error) return rej(new Error('Google sign-in did not finish (' + r.error + ').'));
-      gdToken = r.access_token; gdExp = Date.now() + (r.expires_in || 3600) * 1000; gdState = 'on'; gdStoreToken();
-      S.settings.gdConnected = true; save({ quiet: true }); renderSide(); res(gdToken);
+      if (r.error) { renderSync(); return rej(new Error('Google sign-in did not finish (' + r.error + ').')); }
+      gdToken = r.access_token; gdExp = Date.now() + (r.expires_in || 3600) * 1000; gdStoreToken();
+      S.settings.gdConnected = true; save({ quiet: true }); renderSync(); res(gdToken);
       if (!S.settings.gdEmail) gdFetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)').then(x => x.json()).then(j => { if (j.user) { S.settings.gdEmail = j.user.emailAddress; save({ quiet: true }); } }).catch(() => {});
     };
     gdClient.requestAccessToken({ prompt: '', login_hint: S.settings.gdEmail || undefined });
@@ -843,49 +875,161 @@ function gdAuth() {
 }
 async function gdFetch(url, opts = {}) {
   const r = await fetch(url, { ...opts, headers: { Authorization: 'Bearer ' + gdToken, ...(opts.headers || {}) } });
-  if (r.status === 401) { gdToken = null; gdStoreToken(); gdState = 'paused'; renderSide(); throw new Error('Google Drive session expired — reconnect in Backup & settings.'); }
-  if (!r.ok && r.status !== 404) throw new Error('Google Drive error ' + r.status);
+  if (r.status === 401) { gdToken = null; gdStoreToken(); renderSync(); throw new Error('Google sign-in expired'); }
+  if (!r.ok && r.status !== 404) throw new Error('Drive error ' + r.status);
   return r;
 }
 async function gdFindFile() {
   if (S.settings.gdFileId) return S.settings.gdFileId;
   const q = encodeURIComponent(`name='${BACKUP_NAME}' and trashed=false`);
-  const r = await (await gdFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&spaces=drive&fields=files(id,modifiedTime)&orderBy=modifiedTime desc`)).json();
+  const r = await (await gdFetch(`${GD_API}?q=${q}&spaces=drive&fields=files(id,modifiedTime)&orderBy=modifiedTime desc`)).json();
   const id = r.files && r.files[0] && r.files[0].id;
   if (id) { S.settings.gdFileId = id; save({ quiet: true }); }
   return id || null;
 }
-async function gdBackup(loud) {
-  if (!gdValid()) { gdState = 'paused'; renderSide(); return; }
-  let id = await gdFindFile();
-  if (!id) {
-    const r = await (await gdFetch('https://www.googleapis.com/drive/v3/files', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: BACKUP_NAME, mimeType: 'application/json' }) })).json();
-    id = r.id; S.settings.gdFileId = id;
+async function gdMeta(id) {
+  const r = await gdFetch(`${GD_API}/${id}?fields=modifiedTime,trashed`);
+  if (r.status === 404) return null;
+  const j = await r.json(); return j.trashed ? null : j;
+}
+async function gdDownload(id) { const r = await gdFetch(`${GD_API}/${id}?alt=media`); return r.status === 404 ? null : r.json(); }
+
+/* Upload. Unless forced, refuses (conflict) if Drive changed since this browser last synced. */
+async function gdPush(force) {
+  sync.inflight = true; sync.phase = 'uploading'; renderSync();
+  try {
+    let id = await gdFindFile();
+    if (id) {
+      const meta = await gdMeta(id);
+      if (!meta) { id = null; S.settings.gdFileId = ''; }
+      else if (!force) {
+        const base = S.settings.gdRemoteMod;
+        const ours = base ? meta.modifiedTime === base : S.settings.gdLast && new Date(meta.modifiedTime) <= new Date(new Date(S.settings.gdLast).getTime() + 120000);
+        if (!ours) throw Object.assign(new Error('Drive has newer changes'), { conflict: true });
+      }
+    }
+    if (!id) {
+      const r = await (await gdFetch(GD_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: BACKUP_NAME, mimeType: 'application/json' }) })).json();
+      id = S.settings.gdFileId = r.id;
+    }
+    const snap = S.updatedAt;
+    const up = await gdFetch(`${GD_UP}/${id}?uploadType=media&fields=modifiedTime`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: backupJSON() });
+    if (up.status === 404) { S.settings.gdFileId = ''; sync.inflight = false; return gdPush(force); }
+    const j = await up.json();
+    Object.assign(S.settings, { gdRemoteMod: j.modifiedTime, gdSyncedVersion: snap, gdLast: new Date().toISOString() });
+    save({ quiet: true });
+    sync.phase = 'idle'; sync.error = ''; sync.retry = 0;
+  } finally { sync.inflight = false; renderSync(); }
+}
+/* Replace this browser's data with Drive's, keeping device-specific settings. */
+function applyRemote(remote, mod) {
+  const keepKeys = ['gdClientId', 'gdFileId', 'gdConnected', 'gdEmail', 'gdAuto', 'localLast', 'exportLast'];
+  const keep = Object.fromEntries(keepKeys.map(k => [k, S.settings[k]])), ui = S.ui;
+  S = migrate(remote);
+  Object.assign(S.settings, keep, { gdRemoteMod: mod, gdSyncedVersion: S.updatedAt, gdLast: new Date().toISOString() });
+  if (S.courses[ui.course] || ui.view !== 'course') S.ui = ui;
+  save({ quiet: true }); sync.phase = 'idle'; render();
+}
+/* Pull newer Drive data if this browser is clean; flag a conflict if both changed. */
+async function gdCheckRemote() {
+  if (!driveOn() || !gdValid() || sync.inflight || !navigator.onLine || sync.phase === 'conflict') return;
+  sync.inflight = true;
+  try {
+    const id = await gdFindFile(); if (!id) return;
+    const meta = await gdMeta(id); if (!meta) return;
+    if (!S.settings.gdRemoteMod || meta.modifiedTime === S.settings.gdRemoteMod) {
+      if (!S.settings.gdRemoteMod && !driveDirty()) { S.settings.gdRemoteMod = meta.modifiedTime; save({ quiet: true }); }
+      return;
+    }
+    if (driveDirty()) { sync.phase = 'conflict'; return; }
+    sync.phase = 'downloading'; renderSync();
+    const remote = await gdDownload(id);
+    if (remote && remote.courses) { applyRemote(remote, meta.modifiedTime); toast('Loaded newer changes from Google Drive (saved on another device)'); }
+  } catch (e) { sync.phase = 'error'; sync.error = e.message; }
+  finally { sync.inflight = false; if (sync.phase === 'downloading') sync.phase = 'idle'; renderSync(); }
+}
+function scheduleDrive(delay = 2000) {
+  clearTimeout(sync.timer);
+  if (driveOn() && S.settings.gdAuto) sync.timer = setTimeout(runDriveSync, delay);
+  renderSync();
+}
+async function runDriveSync() {
+  if (!driveOn() || !S.settings.gdAuto || sync.phase === 'conflict') return renderSync();
+  if (sync.inflight) return scheduleDrive(1500);
+  if (!navigator.onLine || !gdValid() || !driveDirty()) return renderSync();
+  try {
+    await gdPush(false);
+    if (driveDirty()) scheduleDrive(1500);
+  } catch (e) {
+    if (e.conflict) { sync.phase = 'conflict'; }
+    else if (!gdValid()) { sync.phase = 'idle'; }
+    else { sync.phase = 'error'; sync.error = e.message; sync.retry++; scheduleDrive(Math.min(120000, 3000 * 2 ** sync.retry)); }
+    renderSync();
   }
-  const up = await gdFetch(`https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=media`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: backupJSON() });
-  if (up.status === 404) { S.settings.gdFileId = ''; return gdBackup(loud); }
-  S.settings.gdLast = new Date().toISOString(); save({ quiet: true }); renderSide();
-  if (loud) toast('Backed up to Google Drive');
 }
-async function gdDownload() {
-  const id = await gdFindFile(); if (!id) return null;
-  const r = await gdFetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`);
-  if (r.status === 404) { S.settings.gdFileId = ''; return null; }
-  return r.json();
-}
+/* Click handlers (user actions, so the Google popup is allowed) */
 async function gdConnect() {
-  await gdInit(); await gdAuth();
-  const remote = await gdDownload();
-  if (remote && remote.updatedAt && (!S.updatedAt || remote.updatedAt > S.updatedAt) && Object.keys(remote.courses || {}).length) {
-    if (restoreFrom(remote, 'Google Drive (it is newer than this browser)')) return;
+  await gdInit(); await gdAuth(true);
+  const id = await gdFindFile();
+  if (id) {
+    const meta = await gdMeta(id);
+    if (meta) {
+      const remote = await gdDownload(id);
+      if (remote && remote.updatedAt && Object.keys(remote.courses || {}).length && (!S.updatedAt || remote.updatedAt > S.updatedAt)
+        && confirm(`Google Drive has a newer copy of your tracker (saved ${new Date(remote.updatedAt).toLocaleString('en-GB')}). Load it into this browser?\n\nCancel keeps this browser’s data and overwrites Drive.`)) {
+        applyRemote(remote, meta.modifiedTime); toast('Loaded your data from Google Drive'); return;
+      }
+    }
   }
-  await gdBackup(true);
+  await gdPush(true); toast('Connected. Changes now back up to Google Drive automatically.');
+}
+async function gdSyncNow() {
+  await gdInit();
+  if (!gdValid()) await gdAuth(true);
+  if (sync.phase === 'conflict') return gdResolve();
+  clearTimeout(sync.timer);
+  try { await gdPush(false); toast('Synced to Google Drive'); }
+  catch (e) { if (e.conflict) { sync.phase = 'conflict'; renderSync(); return gdResolve(); } throw e; }
+}
+async function gdResolve() {
+  await gdInit(); if (!gdValid()) await gdAuth(true);
+  const id = await gdFindFile(), meta = id && await gdMeta(id), remote = meta && await gdDownload(id);
+  if (!remote) { sync.phase = 'idle'; await gdPush(true); return; }
+  const when = remote.updatedAt ? new Date(remote.updatedAt).toLocaleString('en-GB') : 'unknown time';
+  if (confirm(`Google Drive has changes saved ${when} on another device or tab, and this browser also has changes that aren’t on Drive yet.\n\nOK: use the Drive version (a copy of this browser’s version is downloaded first, just in case)\nCancel: keep this browser’s version and overwrite Drive`)) {
+    exportBackup('iia-tracker-this-browser-before-drive-load');
+    applyRemote(remote, meta.modifiedTime); toast('Loaded the Drive version');
+  } else { sync.phase = 'idle'; await gdPush(true); toast('Drive now has this browser’s version'); }
 }
 async function gdRestore() {
-  await gdInit(); await gdAuth();
-  const remote = await gdDownload();
+  await gdInit(); if (!gdValid()) await gdAuth(true);
+  const id = await gdFindFile(), meta = id && await gdMeta(id), remote = meta && await gdDownload(id);
   if (!remote) { toast('No backup found in Google Drive yet.', 'err'); return; }
-  restoreFrom(remote, 'Google Drive');
+  if (!confirm(`Replace everything in this browser with the Google Drive copy (saved ${remote.updatedAt ? new Date(remote.updatedAt).toLocaleString('en-GB') : 'unknown'})?`)) return;
+  applyRemote(remote, meta.modifiedTime); toast('Restored from Google Drive');
+}
+
+/* Status shown in the sidebar (and as a floating chip on phones) */
+function syncInfo() {
+  const s = S.settings, dirty = driveDirty();
+  if (!s.gdClientId) return { k: 'off', text: 'Drive backup not set up', act: 'settings' };
+  if (!s.gdConnected) return { k: 'off', text: 'Drive not connected', act: 'gd-connect' };
+  if (sync.phase === 'conflict') return { k: 'err', text: 'Drive and this browser both changed. Click to choose', act: 'gd-resolve' };
+  if (!navigator.onLine) return { k: 'warn', text: dirty ? 'Offline. Changes will sync when you’re back online' : 'Offline' };
+  if (sync.phase === 'uploading') return { k: 'busy', text: 'Syncing to Drive…' };
+  if (sync.phase === 'downloading') return { k: 'busy', text: 'Loading changes from Drive…' };
+  if (!gdValid()) return { k: 'warn', text: dirty ? 'Changes waiting. Click to renew Google sign-in' : 'Google sign-in renews on your next click', act: 'gd-sync' };
+  if (sync.phase === 'error') return { k: 'err', text: `Sync failed (${sync.error}). Retrying`, act: 'gd-sync' };
+  if (dirty) return s.gdAuto ? { k: 'busy', text: 'Saving to Drive…' } : { k: 'warn', text: 'Changes not on Drive (auto-sync off)', act: 'gd-sync' };
+  return { k: 'ok', text: `Synced to Drive${s.gdLast ? ', ' + ago(s.gdLast) : ''}`, act: 'gd-sync' };
+}
+function renderSync() {
+  const i = syncInfo();
+  const html = `<button class="sync-chip k-${i.k}" data-act="sync-chip" data-to="${i.act || ''}" title="${esc(i.text)}"><i></i><span>${esc(i.text)}</span></button>`;
+  const a = $('#sync-side'), b = $('#sync-float');
+  if (a) a.innerHTML = html;
+  if (b) b.innerHTML = i.k === 'off' && !S.settings.gdClientId ? '' : html;
+  const st = $('#gd-status'); if (st) st.innerHTML = `<span class="sync-dot k-${i.k}"></span>${esc(i.text)}`;
 }
 
 let bkT;
@@ -893,9 +1037,8 @@ function queueBackups() {
   clearTimeout(bkT);
   bkT = setTimeout(async () => {
     try { if (localHandle && localState === 'on') await writeLocal(false); } catch (e) { localState = 'paused'; renderSide(); }
-    try { if (S.settings.gdAuto && S.settings.gdClientId && gdValid()) await gdBackup(false); else if (S.settings.gdClientId && S.settings.gdLast) { gdState = 'paused'; renderSide(); } }
-    catch (e) { gdState = 'paused'; renderSide(); }
-  }, 5000);
+  }, 2000);
+  scheduleDrive(2000);
 }
 
 /* =========================================================
@@ -925,15 +1068,17 @@ function renderSide() {
   const s = S.settings, lines = [];
   lines.push(`<div class="row"><span>This browser</span><span>${S.updatedAt ? 'saved' : '—'}</span></div>`);
   if (localHandle) lines.push(`<div class="row"><span>Local file</span><span class="${localState === 'on' ? '' : 'warn'}">${localState === 'on' ? (ago(s.localLast) || 'on') : 'allow on click'}</span></div>`);
-  if (s.gdClientId) lines.push(`<div class="row"><span>Google Drive</span><span class="${gdValid() ? '' : 'warn'}">${gdValid() ? (ago(s.gdLast) || 'connected') : s.gdConnected ? 'renews on click' : 'reconnect'}</span></div>`);
+
   if (!localHandle && !s.gdLast && !s.exportLast && S.order.length) lines.push(`<div class="warn" style="margin-top:6px">No backup yet</div>`);
-  $('#side-foot').innerHTML = lines.join('');
+  $('#side-foot').innerHTML = `<div id="sync-side"></div>` + lines.join('');
+  renderSync();
 }
 function renderMain() {
   const v = $('#view');
   if (S.ui.view === 'settings') v.innerHTML = settingsView();
   else if (S.ui.view === 'course' && cur()) v.innerHTML = courseView(cur());
   else v.innerHTML = overviewView();
+  renderSync();
 }
 
 /* ---------- Overview ---------- */
@@ -1192,13 +1337,14 @@ function settingsView() {
       <h3 style="margin-top:22px">Google Drive</h3>
       <label class="field"><span>OAuth client ID</span><input type="text" data-f="set-gdid" value="${esc(s.gdClientId)}" placeholder="1234-abc.apps.googleusercontent.com" spellcheck="false">
         <small>Create a Web client ID in Google Cloud Console and add <b>${esc(orig)}</b> as an authorised JavaScript origin. The README has the steps.</small></label>
-      <label class="chk"><input type="checkbox" data-f="set-gdauto" ${s.gdAuto ? 'checked' : ''}> Back up to Drive automatically after each change</label>
+      <label class="chk"><input type="checkbox" data-f="set-gdauto" ${s.gdAuto ? 'checked' : ''}> Sync to Drive automatically after every change</label>
       <div class="btn-row">
-        <button class="btn primary" data-act="gd-connect" ${s.gdClientId ? '' : 'disabled'}>${gdValid() ? 'Back up now' : 'Connect and back up'}</button>
+        ${s.gdConnected ? `<button class="btn primary" data-act="gd-sync">Sync now</button>` : `<button class="btn primary" data-act="gd-connect" ${s.gdClientId ? '' : 'disabled'}>Connect Google Drive</button>`}
         <button class="btn" data-act="gd-restore" ${s.gdClientId ? '' : 'disabled'}>Restore from Drive</button>
         ${s.gdConnected ? '<button class="btn" data-act="gd-disconnect">Disconnect</button>' : ''}
       </div>
-      <p class="status-line">${gdValid() ? `Connected${s.gdEmail ? ' as ' + esc(s.gdEmail) : ''}${s.gdLast ? `, last backup ${ago(s.gdLast)}` : ''}.` : s.gdConnected ? `Google sign-ins expire after an hour. The app renews it the next time you click anything, and backs up any changes made meanwhile.${s.gdLast ? ` Last backup ${ago(s.gdLast)}.` : ''}` : 'Not connected.'} Saves ${BACKUP_NAME} in your Drive; Drive keeps earlier versions.</p>
+      <p class="status-line" id="gd-status"></p>
+      <p class="status-line">${s.gdConnected ? `Signed in${s.gdEmail ? ' as ' + esc(s.gdEmail) : ''}. ` : ''}Every change is saved to ${BACKUP_NAME} in your Drive about 2 seconds later, and Drive keeps earlier versions. Opening the tracker on another device loads the newest copy. Google sign-ins last an hour; the app renews it on your next click (a popup may flash briefly).</p>
     </div>
     <div class="sheet">
       <h2>Question availability</h2>
@@ -1294,10 +1440,13 @@ async function act(a, d) {
     case 'export': return exportBackup();
     case 'local-pick': await pickLocalFile(); return render();
     case 'local-reconnect': await reconnectLocal(); return render();
-    case 'gd-connect': try { gdValid() ? await gdBackup(true) : await gdConnect(); } catch (e) { toast(e.message, 'err'); } return render();
+    case 'gd-connect': try { await gdConnect(); } catch (e) { toast(e.message, 'err'); } return render();
+    case 'gd-sync': try { await gdSyncNow(); } catch (e) { toast(e.message, 'err'); } return render();
+    case 'gd-resolve': try { await gdResolve(); } catch (e) { toast(e.message, 'err'); } return render();
+    case 'sync-chip': { const to = d.to; if (to && to !== 'sync-chip') return act(to, {}); return act('settings', {}); }
     case 'gd-disconnect': {
       if (gdToken && window.google) try { google.accounts.oauth2.revoke(gdToken, () => {}); } catch (e) {}
-      gdToken = null; gdExp = 0; gdStoreToken(); gdClient = null; Object.assign(S.settings, { gdConnected: false, gdEmail: '' }); save({ quiet: true }); toast('Disconnected from Google Drive'); return render();
+      gdToken = null; gdExp = 0; gdStoreToken(); gdClient = null; clearTimeout(sync.timer); sync.phase = 'idle'; Object.assign(S.settings, { gdConnected: false, gdEmail: '', gdRemoteMod: '' }); save({ quiet: true }); toast('Disconnected from Google Drive'); return render();
     }
     case 'gd-restore': try { await gdRestore(); } catch (e) { toast(e.message, 'err'); } return render();
     default: return;
@@ -1368,7 +1517,7 @@ function field(f, el, ev) {
       S.settings.intervals = iv; save(); return render();
     }
     case 'set-gdid': S.settings.gdClientId = el.value.trim(); gdClient = null; save(); return render();
-    case 'set-gdauto': S.settings.gdAuto = el.checked; return save();
+    case 'set-gdauto': S.settings.gdAuto = el.checked; save({ quiet: true }); if (el.checked) scheduleDrive(500); return renderSync();
   }
 }
 
@@ -1434,13 +1583,13 @@ document.addEventListener('paste', e => {
   }
 });
 
-let lastSilent = 0;
+let lastRenew = 0;
 document.addEventListener('click', e => {
-  if (Date.now() - lastSilent < 120000) return;
   const t = e.target.closest && e.target.closest('[data-act]');
-  if (t && /^(gd-|local-)/.test(t.dataset.act)) return;
+  if (t && /^(gd-|local-|sync)/.test(t.dataset.act)) return;
+  if (Date.now() - lastRenew < 120000) return;
   if (localHandle && localState === 'paused') {
-    lastSilent = Date.now();
+    lastRenew = Date.now();
     localHandle.requestPermission({ mode: 'readwrite' }).then(p => {
       if (p !== 'granted') return;
       localState = 'on'; renderSide(); if (S.ui.view === 'settings') renderMain();
@@ -1448,17 +1597,38 @@ document.addEventListener('click', e => {
     }).catch(() => {});
     return;
   }
-  if (S.settings.gdConnected && S.settings.gdClientId && !gdValid() && gdClient) {
-    lastSilent = Date.now();
-    gdAuth().then(() => { if (S.ui.view === 'settings') renderMain(); if (S.settings.gdAuto && needsSync(S.settings.gdLast)) return gdBackup(false); }).catch(() => {});
+  /* renew Google sign-in shortly before it expires, so syncing never stalls */
+  if (driveOn() && !gdFresh() && gdClient && navigator.onLine) {
+    lastRenew = Date.now();
+    const wasValid = gdValid();
+    gdAuth(true).then(async () => {
+      if (S.ui.view === 'settings') renderMain();
+      if (!wasValid) await gdCheckRemote();
+      runDriveSync();
+    }).catch(() => {});
   }
 }, true);
 
+/* Another tab of the tracker saved: pick up its data so the two tabs don't fight */
+window.addEventListener('storage', e => {
+  if (e.key === STORE && e.newValue) { try { S = migrate(JSON.parse(e.newValue)); render(); } catch (err) {} }
+  if (e.key === GD_TOKEN_KEY) { gdLoadToken(); renderSync(); }
+});
+window.addEventListener('online', () => { renderSync(); gdCheckRemote().then(() => scheduleDrive(500)); });
+window.addEventListener('offline', renderSync);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { if (driveDirty() && gdValid()) { clearTimeout(sync.timer); runDriveSync(); } }
+  else gdCheckRemote().then(() => scheduleDrive(500));
+});
+
 render();
 initLocal();
-if (S.settings.gdConnected && S.settings.gdClientId) gdInit().catch(() => {});
-if (gdValid() && S.settings.gdAuto && needsSync(S.settings.gdLast)) setTimeout(() => gdBackup(false).catch(() => {}), 1500);
-setInterval(() => renderSide(), 60000);
+if (driveOn()) {
+  gdInit().catch(() => {});
+  if (gdValid()) gdCheckRemote().then(() => scheduleDrive(800));
+}
+setInterval(() => { renderSide(); }, 60000);
+setInterval(() => { if (document.visibilityState === 'visible') gdCheckRemote(); }, 5 * 60000);
 </script>
 </body>
 </html>

@@ -224,6 +224,10 @@ dialog.imp::backdrop{background:rgba(10,20,35,.45)}
 details.sched{margin-top:14px;background:var(--sheet);border:1px solid var(--rule);border-radius:4px}
 details.sched summary{cursor:pointer;padding:12px 16px;font-family:var(--cond);font-weight:600;font-size:1.05rem}
 details.sched .in{padding:0 16px 16px}
+.sched-sum{margin-top:14px;border-top:1px solid var(--rule);padding-top:10px;font-size:.88rem}
+.sum-row{display:flex;gap:12px;padding:5px 0;border-bottom:1px dashed var(--rule)}
+.sum-p{font-family:var(--cond);font-weight:600;min-width:72px;white-space:nowrap}
+.sum-row .sep{color:var(--ink-2)}
 details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);border-radius:3px;padding:10px;background:var(--paper);font-size:.9rem;line-height:1.45;resize:vertical}
 .ocr-status{font-size:.85rem;color:var(--ink-2)}
 
@@ -393,6 +397,10 @@ const DEFAULT_STATE = () => ({
 function fixCourse(c) {
   c.lectures ||= []; c.papers ||= []; c.tripos ||= []; c.sections ||= {}; c.schedule ||= {};
   c.scheduleText ||= ''; c.reviewCols ||= 3; c.tab ||= 'lectures';
+  if (c.scheduleText && /examples?\s*(?:paper|sheet)\s*\d/i.test(c.scheduleText)) {
+    const r = parseSchedule(c.scheduleText, (c.papers[0] && c.papers[0].num) || '1');
+    if (r.papersNamed) c.schedule = r.map;
+  }
   c.lectures.forEach(l => { l.reviews ||= []; if (!l.location) l.location = locFromTitle(l.title); });
   if (c.name && /^[\/\s]|\[/.test(c.name)) c.name = cleanCourseName(c.name, c.code);
   return c;
@@ -679,7 +687,8 @@ async function analysePdf(f, zone) {
   catch (e) { err = 'Couldn’t read the text of this PDF, so fill in the details by hand.'; }
   const head = lines.slice(0, 40).join('\n');
   const code = findCode(f.name) || (S.ui.view === 'course' ? S.ui.course : '') || findCode(head) || '';
-  let kind = zone === 'sched' ? 'sched' : guessKind(f.name, head);
+  const guideLines = lines.filter(l => /\b(lecture|section|handout)s?\s*\d+\s*[:\-]\s*(?:P\d+\s*:?\s*)?Q\s*\d/i.test(l)).length;
+  let kind = zone === 'sched' || (zone !== 'tripos' && (guideLines >= 2 || /timings?|when to (?:do|attempt)/i.test(f.name))) ? 'sched' : guessKind(f.name, head);
   if (zone === 'tripos') kind = CRIB_RE.test(f.name) ? 'tripcrib' : 'tripos';
   if (zone === 'paper' && isTripKind(kind)) kind = CRIB_RE.test(f.name) ? 'crib' : 'paper';
   const fromName = findPaperNum(f.name), fromText = findPaperNum(head, true);
@@ -839,8 +848,13 @@ function parseSchedule(text, defPaper) {
   const LIST = '((?:\\d+\\s*(?:-\\s*\\d+)?\\s*(?:,|&|\\band\\b)?\\s*)+)';
   const PAPER_RE = new RegExp('P(?:aper)?\\s*(\\d+)\\s*[:.,\\-]?\\s*(?:Q(?:uestions?|s)?\\.?|[O0](?=\\d))\\s*' + LIST, 'gi');
   const Q_RE = new RegExp('(?:Q(?:uestions?|s)?\\.?)\\s*' + LIST, 'gi');
+  /* A heading line such as “Examples Paper 2:” sets which paper the following Q numbers belong to */
+  const HEAD_RE = /\b(?:examples?\s*(?:paper|sheet)|e\.?p\.?|paper)\s*(?:no\.?\s*)?(\d{1,2})\b(?!\s*[:.,-]?\s*Q)/i;
+  let curPaper = defPaper;
   for (const raw of text.split(/\n/)) {
-    const line = raw.replace(/[–—−]/g, '-').trim(); if (!line) continue;
+    let line = raw.replace(/[–—−]/g, '-').trim(); if (!line) continue;
+    const hm = line.match(HEAD_RE);
+    if (hm) { curPaper = String(+hm[1]); res.papersNamed = true; line = (line.slice(0, hm.index) + ' ' + line.slice(hm.index + hm[0].length)).trim(); if (!line) continue; }
     const tm = line.match(/\b(section|handout|lecture|lect|lec)s?\s*\.?\s*(\d+)/i) || line.match(/(?:^|\W)(?:after\s+)?([LS])\s*(\d+)\b(?!\s*:?\s*Q)/i);
     if (!tm) continue;
     const kind = /^(section|handout|s)$/i.test(tm[1]) ? 'S' : 'L';
@@ -855,7 +869,7 @@ function parseSchedule(text, defPaper) {
     let any = false, m;
     PAPER_RE.lastIndex = 0;
     while ((m = PAPER_RE.exec(rest))) { add(String(+m[1]), m[2]); any = true; }
-    if (!any && defPaper) { Q_RE.lastIndex = 0; while ((m = Q_RE.exec(rest))) add(defPaper, m[1]); }
+    if (!any && curPaper) { Q_RE.lastIndex = 0; while ((m = Q_RE.exec(rest))) add(curPaper, m[1]); }
   }
   return res;
 }
@@ -1491,11 +1505,23 @@ function examplesTab(c) {
 }
 function schedBox(c) {
   return `<summary>When can each question be done?</summary><div class="in">
-    <p class="muted">Paste the lecturer’s guide below, or drop or paste a screenshot, text file or PDF of it. Lines like “Section 2: P1:Q6,7”, “Section 6: P2:Q8,9, P3:Q5” or “After lecture 4: Q1-3” are understood. It applies to every paper in this course.</p>
+    <p class="muted">Paste the lecturer’s guide below, or drop or paste a screenshot, text file or PDF of it. Lines like “Section 2: P1:Q6,7” or “Lecture 4: Q1, Q3” are understood, and a heading such as “Examples Paper 2:” makes the lines after it apply to that paper. It applies to every paper in this course.</p>
     <textarea data-f="schedtext" data-drop="sched" placeholder="Section 1: P1:Q5&#10;Section 2: P1:Q6,7&#10;Section 3: n/a&#10;…" aria-label="Question guide">${esc(c.scheduleText)}</textarea>
     <div class="btn-row"><button class="btn primary" data-act="apply-sched">Apply to questions</button>
     <label class="btn">Read from screenshot or file…<input type="file" accept="image/*,.txt,.pdf" data-f="schedfile" hidden></label>
-    <span class="ocr-status" id="ocr-status"></span></div></div>`;
+    <span class="ocr-status" id="ocr-status"></span></div>${schedSummary(c)}</div>`;
+}
+function schedSummary(c) {
+  const nums = Object.keys(c.schedule || {}).sort(numSort);
+  if (!nums.length) return '';
+  const tLabel = t => t[0] === 'S' ? 'Section ' + t.slice(1) : 'Lecture ' + t.slice(1);
+  return `<div class="sched-sum"><b>Understood as</b>${nums.map(n => {
+    const groups = {};
+    Object.entries(c.schedule[n]).sort((a, b) => a[0] - b[0]).forEach(([q, t]) => (groups[t] ||= []).push('Q' + q));
+    const order = Object.keys(groups).sort((a, b) => a[0].localeCompare(b[0]) || a.slice(1) - b.slice(1));
+    const p = c.papers.find(x => x.num === n);
+    return `<div class="sum-row"><span class="sum-p">Paper ${esc(n)}${p ? '' : ' <small>(not added yet)</small>'}</span><span>${order.map(t => `${tLabel(t)}: ${groups[t].join(', ')}`).join('<span class="sep"> · </span>')}</span></div>`;
+  }).join('')}<p class="muted" style="font-size:.8rem;margin:6px 0 0">Questions not listed are treated as ${S.settings.unscheduled === 'available' ? 'available any time' : 'locked'} (change this in Backup &amp; settings). If this is wrong, edit the text above and apply again.</p></div>`;
 }
 function qTable(c, p, kind) {
   const isP = kind === 'paper';

@@ -127,6 +127,10 @@ body.dragging .drag-banner{display:block}
 .rowh .lw{display:inline-block;vertical-align:middle;line-height:1.25}
 .rowh .ld{display:block;font-weight:500}
 .rowh .lt{display:block;color:var(--ink-2);font-size:.82rem}
+.lec-edit{background:none;border:0;padding:2px 4px;margin:-2px -4px;border-radius:3px;cursor:pointer;text-align:left;color:inherit}
+.lec-edit:hover{background:var(--blue-soft)}
+.lec-edit:hover .ld{text-decoration:underline dotted}
+.rowh input[type=datetime-local]{border:1px solid var(--blue);border-radius:3px;padding:3px 4px;background:var(--sheet);font-size:.85rem}
 .rowh .sec-tag{display:block;font-size:.75rem;color:var(--blue);font-weight:500}
 tr.future .rowh .ln,tr.future .rowh .ld{color:var(--ink-2)}
 tr.future td{background:repeating-linear-gradient(135deg,transparent 0 8px,var(--grid) 8px 9px)}
@@ -282,6 +286,7 @@ const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
 const z2 = n => String(n).padStart(2, '0');
+const localDT = d => `${ymd(d)}T${z2(d.getHours())}:${z2(d.getMinutes())}`;
 const ymd = d => `${d.getFullYear()}-${z2(d.getMonth() + 1)}-${z2(d.getDate())}`;
 const todayStr = () => ymd(new Date());
 const parseYmd = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
@@ -343,7 +348,8 @@ const DEFAULT_STATE = () => ({
 function fixCourse(c) {
   c.lectures ||= []; c.papers ||= []; c.tripos ||= []; c.sections ||= {}; c.schedule ||= {};
   c.scheduleText ||= ''; c.reviewCols ||= 3; c.tab ||= 'lectures';
-  c.lectures.forEach(l => { l.reviews ||= []; });
+  c.lectures.forEach(l => { l.reviews ||= []; if (!l.location) l.location = locFromTitle(l.title); });
+  if (c.name && /^[\/\s]|\[/.test(c.name)) c.name = cleanCourseName(c.name, c.code);
   return c;
 }
 function migrate(s) {
@@ -510,11 +516,13 @@ function expandEvent(ev) {
   const ex = new Set(ev.EXDATE.map(x => { const d = icsDate(x); return d ? d.getTime() : 0; }));
   return out.filter(d => !ex.has(d.getTime()));
 }
+const locFromTitle = t => { const m = String(t || '').match(/\(([^()]+)\)\s*$/); return m ? m[1].trim() : ''; };
 function cleanCourseName(summary, code) {
   return summary.replace(new RegExp('\\b' + code + '\\b', 'i'), '')
+    .replace(/\[.*$/, '')
     .replace(/\b(lectures?|lect?)\b\.?\s*\d*/ig, '')
     .replace(/\(\s*\)/g, '')
-    .replace(/^[\s:\-–—|,.]+|[\s:\-–—|,.]+$/g, '').trim();
+    .replace(/^[\s:\-–—|,.\/]+|[\s:\-–—|,.\/]+$/g, '').trim();
 }
 function importICS(text, filename) {
   const events = parseICS(text);
@@ -533,7 +541,7 @@ function importICS(text, filename) {
     const nm = cleanCourseName(summary, code); if (nm) g.names[nm] = (g.names[nm] || 0) + 1;
     const end = icsDate(ev.DTEND), start0 = icsDate(ev.DTSTART);
     const dur = end && start0 ? end - start0 : 3600000;
-    for (const d of expandEvent(ev)) g.items.push({ start: d, end: new Date(d.getTime() + dur), title: summary, location: icsUnescape(ev.LOCATION || ''), uid: ev.UID || '' });
+    for (const d of expandEvent(ev)) g.items.push({ start: d, end: new Date(d.getTime() + dur), title: summary, location: icsUnescape(ev.LOCATION || '') || locFromTitle(summary), uid: ev.UID || '' });
   }
   const codes = Object.keys(byCode);
   if (!codes.length) { toast(`Nothing imported from ${filename}: no lecture events with a course code.`, 'err'); return; }
@@ -1015,7 +1023,7 @@ function lecturesTab(c) {
   const iv = S.settings.intervals;
   const head = `<tr><th>Lecture</th><th>1st watch</th>${Array.from({ length: c.reviewCols }, (_, k) => `<th>${ordinal(k + 2)} review</th>`).join('')}
     <th><button class="icon" data-act="add-col" title="Add a review column" aria-label="Add a review column" style="color:var(--blue)">＋</button>${c.reviewCols > 1 ? `<button class="icon" data-act="rm-col" title="Remove last review column" aria-label="Remove last review column">−</button>` : ''}</th>
-    <th>Next</th><th>Notes</th><th></th></tr>`;
+    <th>Next review</th><th>Notes</th><th></th></tr>`;
   const t = todayStr();
   const rows = c.lectures.map((l, i) => {
     const d = new Date(l.start), future = ymd(d) > t;
@@ -1026,7 +1034,9 @@ function lecturesTab(c) {
       cells += `<td>${v ? dateCell('rdate', i, k, v) : prevOk && k === l.reviews.length ? `<button class="stamp ghost" data-act="rev" data-i="${i}" data-k="${k}">Log today</button>` : '<span class="dash">–</span>'}</td>`;
     }
     return `<tr class="${future ? 'future' : ''}">
-      <th scope="row" class="rowh" title="${esc(l.title)}${l.location ? '\n' + esc(l.location) : ''}"><span class="ln">L${i + 1}</span><span class="lw"><span class="ld">${fmtDay(d)}</span><span class="lt">${fmtTime(d)}${l.location ? ', ' + esc(l.location) : ''}</span>${ends ? `<span class="sec-tag">${ends} ends</span>` : ''}</span></th>
+      <th scope="row" class="rowh" title="${esc(l.title)}${l.location ? '\n' + esc(l.location) : ''}"><span class="ln">L${i + 1}</span>${c.editLec === l.id
+        ? `<span class="lw"><input type="datetime-local" data-f="lecdt" data-i="${i}" value="${localDT(d)}" aria-label="Date and time of lecture ${i + 1}"><button class="icon" data-act="edit-lec-done" aria-label="Save lecture date" title="Save (Enter). Esc cancels">✓</button></span>`
+        : `<button class="lw lec-edit" data-act="edit-lec" data-i="${i}" title="Change date or time"><span class="ld">${fmtDay(d)}</span><span class="lt">${fmtTime(d)}${l.location ? ', ' + esc(l.location) : ''}</span></button>`}${ends ? `<span class="sec-tag">${ends} ends</span>` : ''}</th>
       ${cells}<td></td><td>${dueBadge(l, future)}</td>
       <td class="c-note"><input data-f="lnote" data-i="${i}" value="${esc(l.note || '')}" placeholder="Notes" aria-label="Notes for lecture ${i + 1}"></td>
       <td><button class="icon" data-act="del-lec" data-i="${i}" aria-label="Delete lecture ${i + 1}" title="Delete lecture">×</button></td></tr>`;
@@ -1049,10 +1059,10 @@ function dueBadge(l, future) {
   if (!l.watched) return '<span class="pill warn">To watch</span>';
   const nd = nextDue(l);
   if (nd.done) return '<span class="pill ok">Reviews done</span>';
-  const diff = daysBetween(todayStr(), nd.date), lab = ordinal(nd.which + 2);
-  if (diff < 0) return `<span class="pill late">${lab} overdue ${-diff} d</span>`;
-  if (diff === 0) return `<span class="pill due">${lab} today</span>`;
-  return `<span class="pill muted">${lab} in ${diff} d</span>`;
+  const diff = daysBetween(todayStr(), nd.date), lab = ordinal(nd.which + 2) + ' review', tip = `title="${lab} was due ${fmtDay(parseYmd(nd.date))}"`;
+  if (diff < 0) return `<span class="pill late" ${tip}>${lab} overdue by ${-diff} d</span>`;
+  if (diff === 0) return `<span class="pill due" ${tip}>${lab} due today</span>`;
+  return `<span class="pill muted" title="${lab} due ${fmtDay(parseYmd(nd.date))}">${lab} in ${diff} d</span>`;
 }
 
 const LEGEND = `<div class="legend"><span><i class="st-grey"></i>Not time yet</span><span><i class="st-white"></i>Ready, not done</span><span><i class="st-red"></i>Can’t do</span><span><i class="st-yellow"></i>Slight query</span><span><i class="st-green"></i>Done, no issues</span></div>`;
@@ -1214,6 +1224,8 @@ async function act(a, d) {
     case 'unwatch': { const l = c.lectures[+d.i]; if (l.reviews.length && !confirm(`Clear the watched date and ${l.reviews.length} review date${l.reviews.length > 1 ? 's' : ''} for L${+d.i + 1}?`)) return; l.watched = null; l.reviews = []; break; }
     case 'rev': c.lectures[+d.i].reviews[+d.k] = todayStr(); break;
     case 'rev-clear': c.lectures[+d.i].reviews.splice(+d.k, 1); break;
+    case 'edit-lec': c.editLec = c.lectures[+d.i].id; save({ quiet: true }); render(); { const el = $('input[data-f="lecdt"]'); if (el) el.focus(); } return;
+    case 'edit-lec-done': { const el = $('input[data-f="lecdt"]'); if (el && el.value && el.value !== el.defaultValue) return applyLecDate(c, +el.dataset.i, el.value); c.editLec = null; save({ quiet: true }); return render(); }
     case 'add-col': c.reviewCols++; break;
     case 'rm-col': {
       const k = c.reviewCols - 1;
@@ -1276,6 +1288,18 @@ async function act(a, d) {
   save(); render();
 }
 
+function applyLecDate(c, i, value) {
+  if (!value) return;
+  const l = c.lectures[i], old = new Date(l.start), nd = new Date(value);
+  if (isNaN(nd)) { toast('That date isn’t complete yet.', 'err'); return; }
+  const dur = new Date(l.end) - old || 3600000;
+  if (l.watched === ymd(old)) l.watched = ymd(nd);
+  l.start = nd.toISOString(); l.end = new Date(nd.getTime() + dur).toISOString();
+  c.lectures.sort((a, b) => new Date(a.start) - new Date(b.start));
+  const ni = c.lectures.indexOf(l);
+  c.editLec = null; save(); render();
+  toast(ni !== i ? `Moved to ${fmtDay(nd)}; it is now L${ni + 1} and later lectures were renumbered` : `L${i + 1} moved to ${fmtDay(nd)}, ${fmtTime(nd)}`);
+}
 const LIVE = new Set(['cname', 'lnote', 'qcom', 'ptitle', 'schedtext', 'qtime']);
 function field(f, el, ev) {
   const c = cur(), d = el.dataset, i = +d.i, k = +d.k;
@@ -1296,6 +1320,7 @@ function field(f, el, ev) {
       const sched = ((c.schedule[p.num] || {})[+d.q + 1]) || '';
       q.unlock = v === sched ? null : v; save(); return render();
     }
+    case 'lecdt': return; // applied with the ✓ button or Enter, so a half-typed date doesn't close the editor
     case 'secafter': c.sections[d.k].after = el.value ? +el.value : null; save(); return render();
     case 'secdone': c.sections[d.k].done = el.checked; save(); return render();
     case 'schedfile': { const file = el.files[0]; el.value = ''; if (file) importSchedule(file).catch(e => toast(e.message, 'err')); return; }
@@ -1314,6 +1339,11 @@ function field(f, el, ev) {
 document.addEventListener('click', e => {
   const b = e.target.closest('[data-act]'); if (!b || b.disabled) return;
   Promise.resolve(act(b.dataset.act, b.dataset)).catch(err => { console.error(err); toast(err.message, 'err'); });
+});
+document.addEventListener('keydown', e => {
+  const t = e.target; if (!t.dataset || t.dataset.f !== 'lecdt') return;
+  if (e.key === 'Enter') { e.preventDefault(); applyLecDate(cur(), +t.dataset.i, t.value); }
+  if (e.key === 'Escape') { cur().editLec = null; render(); }
 });
 document.addEventListener('change', e => { const t = e.target; if (t.dataset && t.dataset.f) field(t.dataset.f, t, 'change'); });
 document.addEventListener('input', e => { const t = e.target; if (t.dataset && LIVE.has(t.dataset.f)) field(t.dataset.f, t, 'input'); });

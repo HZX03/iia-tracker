@@ -75,6 +75,9 @@ button,input,select,textarea{font:inherit;color:inherit}
 .sync-chip.k-err{border-color:#F0716A}
 @keyframes pulse{from{opacity:.35}to{opacity:1}}
 .sync-float{display:none}
+.side-foot .ver{margin-top:8px;font-size:.72rem;opacity:.7}
+.update-bar{position:fixed;top:calc(12px + env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);z-index:70;background:var(--blue);color:#fff;border-radius:4px;padding:8px 10px 8px 16px;display:flex;gap:12px;align-items:center;box-shadow:0 6px 20px rgba(0,0,0,.25);font-size:.9rem}
+.update-bar button{background:#fff;color:var(--blue);border:0;border-radius:3px;padding:5px 12px;font-weight:600;cursor:pointer}
 .side-add{margin:8px 18px 0;display:block;width:calc(100% - 36px);background:none;border:1px dashed rgba(255,255,255,.25);color:var(--side-ink);border-radius:4px;padding:8px;cursor:pointer;font-size:.85rem}
 .side-add:hover{border-color:rgba(255,255,255,.5)}
 
@@ -328,6 +331,7 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
 
 <script>
 'use strict';
+const APP_VERSION = '2026-10-27.8';
 /* =========================================================
    Utilities
    ========================================================= */
@@ -847,11 +851,21 @@ function parseSchedule(text, defPaper) {
   const res = { map: {}, sections: new Set(), lines: 0, assigned: 0 };
   const LIST = '((?:\\d+\\s*(?:-\\s*\\d+)?\\s*(?:,|&|\\band\\b)?\\s*)+)';
   const PAPER_RE = new RegExp('P(?:aper)?\\s*(\\d+)\\s*[:.,\\-]?\\s*(?:Q(?:uestions?|s)?\\.?|[O0](?=\\d))\\s*' + LIST, 'gi');
-  const Q_RE = new RegExp('(?:Q(?:uestions?|s)?\\.?)\\s*' + LIST, 'gi');
+  const Q_RE = new RegExp('(?<![A-Za-z0-9])(?:Q(?:uestions?|s)?\\.?|[O0](?=\\d))\\s*' + LIST, 'gi');   // [O0]: screenshots often read Q as 0 or O
   /* A heading line such as “Examples Paper 2:” sets which paper the following Q numbers belong to */
   const HEAD_RE = /\b(?:examples?\s*(?:paper|sheet)|e\.?p\.?|paper)\s*(?:no\.?\s*)?(\d{1,2})\b(?!\s*[:.,-]?\s*Q)/i;
   let curPaper = defPaper;
-  for (const raw of text.split(/\n/)) {
+  /* Text copied out of a PDF often loses its line breaks. Split any line holding several
+     headings/lectures back into one line per lecture. */
+  const TRIG = '(?:examples?\\s*(?:paper|sheet)\\s*(?:no\\.?\\s*)?\\d+|(?:lecture|lect|lec|section|handout)s?\\s*\\.?\\s*\\d+)';
+  const lines = text.replace(/\r\n?/g, '\n').split('\n').flatMap(l => {
+    const hits = [...l.matchAll(new RegExp('\\b' + TRIG, 'gi'))];
+    if (hits.length < 2) return [l];
+    const firstQ = l.search(/(?<![A-Za-z0-9])(?:Q|[O0](?=\d))\s*\d/i);
+    const reverse = firstQ >= 0 && firstQ < hits[0].index;          // “Q1-3 after lecture 4” style
+    return reverse ? l.split(new RegExp('(?<=\\b' + TRIG + ')', 'gi')) : l.split(new RegExp('(?=\\b' + TRIG + ')', 'gi'));
+  });
+  for (const raw of lines) {
     let line = raw.replace(/[–—−]/g, '-').trim(); if (!line) continue;
     const hm = line.match(HEAD_RE);
     if (hm) { curPaper = String(+hm[1]); res.papersNamed = true; line = (line.slice(0, hm.index) + ' ' + line.slice(hm.index + hm[0].length)).trim(); if (!line) continue; }
@@ -869,7 +883,11 @@ function parseSchedule(text, defPaper) {
     let any = false, m;
     PAPER_RE.lastIndex = 0;
     while ((m = PAPER_RE.exec(rest))) { add(String(+m[1]), m[2]); any = true; }
-    if (!any && curPaper) { Q_RE.lastIndex = 0; while ((m = Q_RE.exec(rest))) add(curPaper, m[1]); }
+    if (!any && curPaper) { Q_RE.lastIndex = 0; while ((m = Q_RE.exec(rest))) { add(curPaper, m[1]); any = true; } }
+    if (!any && curPaper) {   // “Lecture 3: 5, 6” with no Q
+      const bm = line.slice(tm.index + tm[0].length).match(/^\s*[:\-]\s*((?:\d+\s*(?:-\s*\d+)?\s*(?:,|&|\band\b)?\s*)+)$/i);
+      if (bm) add(curPaper, bm[1]);
+    }
   }
   return res;
 }
@@ -1320,7 +1338,7 @@ function renderSide() {
 
 
   if (!localHandle && !s.gdLast && !s.exportLast && S.order.length) lines.push(`<div class="warn" style="margin-top:6px">No backup yet</div>`);
-  $('#side-foot').innerHTML = `<div id="sync-side"></div>` + lines.join('');
+  $('#side-foot').innerHTML = `<div id="sync-side"></div>` + lines.join('') + `<div class="ver">Version ${APP_VERSION}</div>`;
   renderSync();
 }
 function renderMain() {
@@ -1563,6 +1581,7 @@ function paperView(c, p) {
   </div>
   <details class="sched" ${c.scheduleText ? '' : 'open'}>${schedBox(c)}</details>
   ${LEGEND}
+  ${p.questions.some(q => q.unlock != null) ? `<div class="toolbar" style="margin-top:8px"><span class="muted grow">${p.questions.filter(q => q.unlock != null).length} question(s) have “Available after” edited by hand, so the guide doesn’t apply to them.</span><button class="btn" data-act="reset-unlock" ${dd}>Use the guide for all questions</button></div>` : ''}
   ${p.questions.length ? qTable(c, p, 'paper') : `<p class="muted" style="margin-top:12px">No questions yet. Use + to add them.</p>`}
   <p class="muted" style="font-size:.82rem;margin-top:8px">“Available after” takes L4 (after lecture 4), S2 (after section 2), a date like 2026-11-03, or blank. Click a question number to cycle its status.</p>`;
 }
@@ -1678,6 +1697,7 @@ async function act(a, d) {
     case 'qcycle': { const q = getQ(d), order = ['', 'green', 'yellow', 'red']; q.status = order[(order.indexOf(q.status) + 1) % 4]; if (q.status && !q.date) q.date = todayStr(); break; }
     case 'nq': { const p = getP(d); if (!resizeQs(p, p.questions.length + +d.d)) return; break; }
     case 'pdf': return openPdf(d.key);
+    case 'reset-unlock': getP(d).questions.forEach(q => { q.unlock = null; }); toast('All questions now follow the guide'); break;
     case 'apply-sched': { const ta = $('textarea[data-f="schedtext"]'); return applyScheduleText(c, ta ? ta.value : c.scheduleText); }
     case 'add-paper': {
       const next = String((c.papers.map(p => +p.num).sort((a, b) => b - a)[0] || 0) + 1);
@@ -1898,6 +1918,19 @@ document.addEventListener('paste', e => {
   }
 });
 
+let updateShown = false;
+function checkForUpdate() {
+  if (updateShown || !/^https?:/.test(location.protocol)) return;
+  fetch(location.pathname + '?check=' + Date.now(), { cache: 'no-store' }).then(r => r.ok ? r.text() : '').then(t => {
+    const m = t.match(/const APP_VERSION = '([^']+)'/);
+    if (!m || m[1] === APP_VERSION || updateShown) return;
+    updateShown = true;
+    const bar = document.createElement('div'); bar.className = 'update-bar';
+    bar.innerHTML = `<span>A newer version of the tracker is available.</span><button>Reload</button>`;
+    bar.querySelector('button').onclick = () => location.reload();
+    document.body.appendChild(bar);
+  }).catch(() => {});
+}
 let lastRenew = 0;
 document.addEventListener('click', e => {
   const t = e.target.closest && e.target.closest('[data-act]');
@@ -1936,6 +1969,7 @@ document.addEventListener('visibilitychange', () => {
     if (localDirty() && localOn()) { clearTimeout(lsync.timer); runLocalSync(); }
     if (driveDirty() && gdValid()) { clearTimeout(sync.timer); runDriveSync(); }
   } else {
+    checkForUpdate();
     localCheck().then(() => scheduleLocal(400));
     gdCheckRemote().then(() => scheduleDrive(500));
   }
@@ -1943,6 +1977,7 @@ document.addEventListener('visibilitychange', () => {
 
 render();
 initLocal();
+checkForUpdate();
 if (driveOn()) {
   gdInit().catch(() => {});
   if (gdValid()) gdCheckRemote().then(() => scheduleDrive(800));

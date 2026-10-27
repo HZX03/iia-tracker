@@ -184,6 +184,7 @@ tr.future td{background:repeating-linear-gradient(135deg,transparent 0 8px,var(-
 .mini.quiet{color:var(--ink-2)}
 .inline-sel{border:1px solid var(--rule);border-radius:3px;padding:4px 6px;background:var(--sheet);color:var(--ink);font-weight:600;margin-left:4px}
 .c-unlock{min-width:190px!important}
+.c-unlock input.avail-date{width:132px!important;text-transform:none}
 .c-unlock input{width:64px!important;text-transform:uppercase;border:1px solid var(--rule)!important}
 .c-unlock .hint{display:block;font-size:.75rem;color:var(--ink-2);line-height:1.25;margin-top:2px}
 .c-time input{width:72px!important;border:1px solid var(--rule)!important}
@@ -263,6 +264,23 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
 .ledger .code{font-family:var(--cond);font-weight:700;font-size:1.6rem;background:none;border:0;cursor:pointer;padding:0;color:var(--ink)}
 .ledger .code:hover{color:var(--blue)}
 .frac{font-weight:600}
+.todo-course{margin-top:22px}
+.todo-course>h2{display:flex;align-items:baseline;gap:12px;font-size:1rem;margin-bottom:8px}
+.code-link{background:none;border:0;padding:0;cursor:pointer;font-family:var(--cond);font-weight:700;font-size:2rem;color:var(--ink)}
+.code-link:hover{color:var(--blue)}
+.todo-paper{background:var(--sheet);border:1px solid var(--rule);border-radius:4px;margin-bottom:12px}
+.todo-ph{display:flex;align-items:baseline;gap:10px;padding:10px 14px;border-bottom:1px solid var(--rule)}
+.todo-ph .grow{flex:1}
+.todo-list{list-style:none;margin:0;padding:0}
+.todo-list li{display:flex;align-items:center;gap:14px;padding:8px 14px;border-bottom:1px solid var(--rule);flex-wrap:wrap}
+.todo-list li:last-child{border-bottom:0}
+.qcell.small{min-width:46px;height:32px;font-size:1.05rem;cursor:default}
+.todo-info{flex:1;min-width:200px;display:flex;flex-direction:column;font-size:.88rem}
+.todo-since.old{color:var(--late)}
+.todo-com{font-size:.82rem}
+.fchip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--rule);background:var(--sheet);border-radius:999px;padding:4px 12px;cursor:pointer;font-size:.85rem;color:var(--ink-2)}
+.fchip.on{border-color:var(--blue);background:var(--blue-soft);color:var(--ink);font-weight:600}
+.fchip i{width:10px;height:10px;border-radius:2px;border:1px solid rgba(22,40,61,.35);display:inline-block}
 .items{list-style:none;padding:0;margin:8px 0 0}
 .items li{border-bottom:1px solid var(--rule)}
 .items li:last-child{border-bottom:0}
@@ -324,6 +342,7 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
     <div class="brand"><b>IIA Tripos Tracker</b><span>Lectures, examples papers, past papers</span></div>
     <nav class="side-nav">
       <button class="nav-btn" data-act="overview">Overview</button>
+      <button class="nav-btn" data-act="todo">To do</button>
     </nav>
     <h2>Courses</h2>
     <div class="side-courses" id="side-courses"></div>
@@ -342,7 +361,7 @@ details.sched textarea{width:100%;min-height:150px;border:1px solid var(--rule);
 
 <script>
 'use strict';
-const APP_VERSION = '2026-10-27.11';
+const APP_VERSION = '2026-10-27.12';
 /* =========================================================
    Utilities
    ========================================================= */
@@ -509,6 +528,16 @@ function describeUnlock(c, code) {
   if (/^(NOW|ANY|-)$/.test(code)) return 'any time';
   if (/^(LATER|LOCK|LOCKED|NO|NOTYET)$/.test(code)) return 'not yet';
   return 'use L4, S2 or a date';
+}
+function availableSince(c, p, i) {
+  const q = p.questions[i], code = (effUnlock(c, p, i) || '').trim().toUpperCase();
+  const lecDay = n => { const l = c.lectures[n - 1]; if (!l) return null; return S.settings.unlockMode === 'watched' ? l.watched : ymd(new Date(l.start)); };
+  let m;
+  if (q.unlock != null && /^(NOW|ANY|-)$/i.test(q.unlock)) return { date: q.availAt || null, why: 'made available by you' };
+  if ((m = code.match(/^L\s*(\d+)$/))) return { date: lecDay(+m[1]), why: 'after L' + m[1] };
+  if ((m = code.match(/^S\s*(\d+)$/))) { const sc = c.sections[m[1]]; return { date: sc && sc.after ? lecDay(+sc.after) : null, why: 'after section ' + m[1] }; }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(code)) return { date: code, why: 'from a set date' };
+  return { date: null, why: 'not in guide' };
 }
 function qState(c, p, i) {
   const q = p.questions[i];
@@ -1363,6 +1392,7 @@ function renderSide() {
 function renderMain() {
   const v = $('#view');
   if (S.ui.view === 'settings') v.innerHTML = settingsView();
+  else if (S.ui.view === 'todo') v.innerHTML = todoView();
   else if (S.ui.view === 'course' && cur()) v.innerHTML = courseView(cur());
   else v.innerHTML = overviewView();
   renderSync();
@@ -1444,6 +1474,46 @@ function overviewView() {
       </div>
     </div>
   </div>`;
+}
+
+/* ---------- To do: every available, unfinished question, by paper ---------- */
+function todoView() {
+  const f = S.ui.todoF ||= { white: true, red: false, yellow: false, tripos: false };
+  const want = st => (st === 'white' && f.white) || (st === 'red' && f.red) || (st === 'yellow' && f.yellow);
+  const t = todayStr(); let total = 0;
+  const blocks = S.order.map(code => {
+    const c = S.courses[code], papers = [];
+    c.papers.forEach(p => {
+      const qs = p.questions.map((q, i) => ({ q, i, st: qState(c, p, i) })).filter(x => want(x.st));
+      if (qs.length) papers.push({ p, kind: 'paper', label: `Examples paper ${p.num}${p.title ? ': ' + p.title : ''}`, qs });
+    });
+    if (f.tripos) c.tripos.forEach(p => {
+      const qs = p.questions.map((q, i) => ({ q, i, st: q.status || 'white' })).filter(x => want(x.st));
+      if (qs.length) papers.push({ p, kind: 'trip', label: `Tripos ${p.year}`, qs });
+    });
+    if (!papers.length) return '';
+    return `<section class="todo-course"><h2><button class="code-link" data-act="course" data-code="${esc(code)}">${esc(code)}</button><span class="muted">${esc(c.name || '')}</span></h2>
+      ${papers.map(({ p, kind, label, qs }) => {
+        total += qs.length;
+        const goto = `data-act="goto" data-code="${esc(code)}" data-tab="${kind === 'trip' ? 'tripos' : 'examples'}" data-pid="${p.id}"`;
+        return `<div class="todo-paper"><div class="todo-ph"><h3>${esc(label)}</h3><span class="muted">${qs.length} to do</span><span class="grow"></span><button class="mini" ${goto}>Open paper</button></div>
+        <ul class="todo-list">${qs.map(({ q, i, st }) => {
+          const dd = `data-code="${esc(code)}" data-kind="${kind}" data-pid="${p.id}" data-q="${i}"`;
+          const since = kind === 'paper' ? availableSince(c, p, i) : null;
+          const age = since && since.date ? daysBetween(since.date, t) : null;
+          const sinceTxt = kind === 'trip' ? 'past paper'
+            : since.date ? `${since.date > t ? 'from' : 'available since'} ${fmtShort(parseYmd(since.date))}${age > 0 ? ` (${age} d)` : age === 0 ? ' (today)' : ''}, ${since.why}` : since.why;
+          return `<li><span class="qcell st-${st} small">Q${i + 1}</span>
+            <span class="todo-info"><span class="todo-since${age >= 14 ? ' old' : ''}">${esc(sinceTxt)}</span>${q.comment ? `<span class="muted todo-com">${esc(q.comment)}</span>` : ''}</span>
+            <span class="seg">${STATUSES.filter(([v]) => v).map(([v, cls, lab]) => `<button class="sbtn" data-act="qs" ${dd} data-s="${v}" title="Mark Q${i + 1} ${lab.toLowerCase()}"><i class="st-${cls}"></i>${lab}</button>`).join('')}</span></li>`;
+        }).join('')}</ul></div>`;
+      }).join('')}</section>`;
+  }).join('');
+  const chip = (k, label, cls) => `<button class="fchip ${f[k] ? 'on' : ''}" data-act="todo-f" data-k="${k}" aria-pressed="${!!f[k]}">${cls ? `<i class="st-${cls}"></i>` : ''}${label}</button>`;
+  return `<h1 class="ov-title">To do</h1>
+  <div class="toolbar"><span class="muted">Show</span>${chip('white', 'Ready, not done', 'white')}${chip('red', 'Can’t do', 'red')}${chip('yellow', 'Query', 'yellow')}${chip('tripos', 'Include tripos papers')}<span class="grow"></span><span class="muted">${total} question${total === 1 ? '' : 's'}</span></div>
+  ${blocks || `<div class="empty"><h2>Nothing to do right now</h2><p class="muted">Questions appear here once they’re available and not yet marked done. Lecture dates, the question guide and “Make available” decide when that is.</p></div>`}
+  <p class="muted" style="font-size:.82rem;margin-top:14px">Marking a question here updates it on its paper too. Dates in red have been waiting two weeks or more.</p>`;
 }
 
 /* ---------- Course ---------- */
@@ -1570,12 +1640,15 @@ function unlockCell(c, p, i, dd) {
   const manualNow = q.unlock != null && /^(NOW|ANY|-)$/i.test(q.unlock);
   const manualLater = q.unlock != null && /^(LATER|LOCK|LOCKED|NO|NOTYET)$/i.test(q.unlock);
   const locked = !isUnlocked(c, eff);
-  const hint = manualNow ? 'made available by you' : manualLater ? 'marked not yet by you' : describeUnlock(c, eff) + (q.unlock != null ? ' (edited)' : '');
+  const hint = manualNow ? `made available by you${q.availAt ? ' on ' + fmtShort(parseYmd(q.availAt)) : ''}` : manualLater ? 'marked not yet by you' : describeUnlock(c, eff) + (q.unlock != null ? ' (edited)' : '');
   let btn = '';
   if (manualNow) btn = `<button class="mini" data-act="q-guide" ${dd} title="Go back to ${guide ? 'the guide: ' + describeUnlock(c, guide) : 'the default for questions not in the guide'}">Undo</button>`;
   else if (locked) btn = `<button class="mini" data-act="q-avail" ${dd} title="Mark Q${i + 1} as ready to do now, whatever the guide says">Make available</button>`;
   else if (!q.status) btn = `<button class="mini quiet" data-act="q-later" ${dd} title="Grey Q${i + 1} out until you make it available">Not yet</button>`;
-  return `<td class="c-unlock"><div class="unl"><input data-f="qunlock" ${dd} value="${esc(manualNow ? 'NOW' : manualLater ? 'LATER' : eff)}" placeholder="any" aria-label="Q${i + 1} available after">${btn}</div><span class="hint">${esc(hint)}</span></td>`;
+  const field = manualNow
+    ? `<input type="date" class="avail-date" data-f="qavaildate" ${dd} value="${esc(q.availAt || '')}" title="Date you made it available" aria-label="Q${i + 1} made available on">`
+    : `<input data-f="qunlock" ${dd} value="${esc(manualLater ? 'LATER' : eff)}" placeholder="any" aria-label="Q${i + 1} available after">`;
+  return `<td class="c-unlock"><div class="unl">${field}${btn}</div><span class="hint">${esc(hint)}</span></td>`;
 }
 function qTable(c, p, kind) {
   const isP = kind === 'paper';
@@ -1701,14 +1774,15 @@ function settingsView() {
 /* =========================================================
    Events
    ========================================================= */
-function getP(d) { const c = cur(); return (d.kind === 'trip' ? c.tripos : c.papers).find(x => x.id === d.pid); }
+function getP(d) { const c = d.code ? S.courses[d.code] : cur(); return (d.kind === 'trip' ? c.tripos : c.papers).find(x => x.id === d.pid); }
 function getQ(d) { return getP(d).questions[+d.q]; }
 function goCourse(code, tab) { S.ui.view = 'course'; S.ui.course = code; if (tab) S.courses[code].tab = tab; save({ quiet: true }); render(); window.scrollTo({ top: 0 }); }
 
 async function act(a, d) {
   const c = cur();
   switch (a) {
-    case 'overview': case 'settings': S.ui.view = a; save({ quiet: true }); render(); window.scrollTo({ top: 0 }); return;
+    case 'todo-f': { const f = S.ui.todoF ||= { white: true, red: false, yellow: false, tripos: false }; f[d.k] = !f[d.k]; save({ quiet: true }); return render(); }
+    case 'overview': case 'settings': case 'todo': S.ui.view = a; save({ quiet: true }); render(); window.scrollTo({ top: 0 }); return;
     case 'course': return goCourse(d.code);
     case 'goto': goCourse(d.code, d.tab); if (d.pid) { S.courses[d.code].activePaper = d.pid; render(); } return;
     case 'tab': c.tab = d.tab; save({ quiet: true }); return render();
@@ -1742,10 +1816,10 @@ async function act(a, d) {
     case 'nq': { const p = getP(d); if (!resizeQs(p, p.questions.length + +d.d)) return; break; }
     case 'pdf': return openPdf(d.key);
     case 'copy-setup': try { await navigator.clipboard.writeText(setupLink()); toast('Setup link copied. Send it to your phone and open it there.'); } catch (e) { prompt('Copy this link:', setupLink()); } return;
-    case 'q-avail': { const q = getQ(d); q.unlock = 'NOW'; toast(`Q${+d.q + 1} is available now`); break; }
-    case 'q-later': { const q = getQ(d); q.unlock = 'LATER'; toast(`Q${+d.q + 1} greyed out until you make it available`); break; }
+    case 'q-avail': { const q = getQ(d); q.unlock = 'NOW'; q.availAt = todayStr(); toast(`Q${+d.q + 1} is available from today`); break; }
+    case 'q-later': { const q = getQ(d); q.unlock = 'LATER'; q.availAt = ''; toast(`Q${+d.q + 1} greyed out until you make it available`); break; }
     case 'q-guide': { const q = getQ(d); q.unlock = null; toast(`Q${+d.q + 1} follows the guide again`); break; }
-    case 'avail-all': { const p = getP(d), c2 = cur(); let n = 0; p.questions.forEach((q, i) => { if (qState(c2, p, i) === 'grey') { q.unlock = 'NOW'; n++; } }); toast(`${n} question${n === 1 ? '' : 's'} made available. “Use the guide for all questions” undoes this.`); break; }
+    case 'avail-all': { const p = getP(d), c2 = cur(); let n = 0; p.questions.forEach((q, i) => { if (qState(c2, p, i) === 'grey') { q.unlock = 'NOW'; q.availAt = todayStr(); n++; } }); toast(`${n} question${n === 1 ? '' : 's'} made available. “Use the guide for all questions” undoes this.`); break; }
     case 'reset-unlock': getP(d).questions.forEach(q => { q.unlock = null; }); toast('All questions now follow the guide'); break;
     case 'apply-sched': { const ta = $('textarea[data-f="schedtext"]'); return applyScheduleText(c, ta ? ta.value : c.scheduleText); }
     case 'add-paper': {
@@ -1844,6 +1918,7 @@ function field(f, el, ev) {
     case 'wdate': if (el.value) { c.lectures[i].watched = el.value; save(); render(); } return;
     case 'rdate': if (el.value) { c.lectures[i].reviews[k] = el.value; save(); render(); } return;
     case 'qdate': getQ(d).date = el.value; return save();
+    case 'qavaildate': getQ(d).availAt = el.value; save(); return render();
     case 'qcrib': getQ(d).crib = el.checked; return save();
     case 'qunlock': {
       const p = getP(d), q = getQ(d), v = el.value.trim().toUpperCase().replace(/\s+/g, '');

@@ -193,6 +193,30 @@ tr.future td{background:repeating-linear-gradient(135deg,transparent 0 8px,var(-
 
 .paper-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-top:20px}
 .paper-head h2{font-size:1.6rem}
+.pnum-h{display:flex;align-items:baseline;gap:6px}
+.pnum{width:2.2em;font:inherit;border:0;border-bottom:2px dashed var(--rule);background:transparent;padding:0 2px;text-align:center}
+.pnum.pyear{width:3.2em}
+.pnum:hover{border-bottom-color:var(--ink-2)}
+.pnum:focus{outline:none;border-bottom-color:var(--blue);border-bottom-style:solid}
+.move{display:inline-flex;align-items:center;gap:6px;font-size:.88rem;color:var(--ink-2)}
+.move select{border:1px solid var(--rule);border-radius:3px;padding:4px 6px;background:var(--sheet);font-weight:600;color:var(--ink)}
+.pdfpair{display:inline-flex}
+.pdfpair .btn:first-child{border-radius:3px 0 0 3px}
+.pdfpair .btn:last-child{border-radius:0 3px 3px 0;border-left:0;color:var(--ink-2)}
+dialog.imp{border:1px solid var(--rule);border-radius:6px;padding:0;width:min(1040px,96vw);max-height:90vh;background:var(--sheet);color:var(--ink);box-shadow:0 20px 60px rgba(0,0,0,.3)}
+dialog.imp::backdrop{background:rgba(10,20,35,.45)}
+.imp-head{padding:18px 22px 6px}
+.imp-body{overflow:auto;max-height:60vh;padding:0 22px}
+.imp-tbl{width:100%;border-collapse:collapse;font-size:.9rem}
+.imp-tbl th{font-family:var(--cond);font-weight:600;text-align:left;padding:8px 6px;border-bottom:1px solid var(--rule);white-space:nowrap}
+.imp-tbl td{padding:9px 6px;border-bottom:1px solid var(--rule);vertical-align:top}
+.imp-tbl input,.imp-tbl select{border:1px solid var(--rule);border-radius:3px;padding:5px 6px;background:var(--paper)}
+.imp-tbl input:focus,.imp-tbl select:focus{border-color:var(--blue);outline:none}
+.imp-tbl small{display:block;font-size:.74rem;color:var(--ink-2);margin-top:3px}
+.imp-file{max-width:220px;word-break:break-word}
+.imp-ef{display:block;min-width:170px;font-size:.85rem}
+.imp-ef.warn{color:var(--due)} .imp-ef.bad,.imp-tbl small.bad{color:var(--late)}
+.imp-foot{display:flex;justify-content:flex-end;gap:8px;padding:14px 22px 18px}
 .paper-head .ptitle{flex:1;min-width:180px;border:0;border-bottom:1px dashed var(--rule);background:transparent;padding:4px 2px;font-size:1rem}
 .nq{display:inline-flex;align-items:center;gap:4px;font-size:.9rem}
 .nq b{min-width:22px;text-align:center}
@@ -625,12 +649,16 @@ function countQuestions(lines) {
   }
   return expected - 1;
 }
-function findPaperNum(s) {
-  s = String(s || '');
-  const m = s.match(/examples?[\s_-]*paper[\s_-]*(?:no\.?\s*)?(\d{1,2})(?!\d)/i)
-    || s.match(/(?:^|[^a-z])ep[\s_-]*(\d{1,2})(?!\d)/i)
-    || s.match(/(?:^|[^a-z0-9])p(?:aper)?[\s_-]*(\d{1,2})(?![\d])/i);
-  return m ? String(+m[1]) : null;
+function findPaperNum(s, strict) {
+  s = String(s || '').replace(new RegExp(CODE_RE.source, 'gi'), ' ');   // a course code like 3A3 is never the paper number
+  const pats = [
+    /examples?[\s_.-]*(?:paper|sheet)s?[\s_.-]*(?:no\.?\s*|number\s*)?(\d{1,2})(?!\d)/i,
+    /(?:^|[^a-z])e\.?p\.?[\s_.-]*(\d{1,2})(?![\d])/i,
+    /(?:^|[^a-z])(?:examples?|exs?|exp)[\s_.-]*(\d{1,2})(?![\d])/i
+  ];
+  if (!strict) pats.push(/(?:^|[^a-z0-9])(?:paper|sheet|p)[\s_.-]*(\d{1,2})(?![\d])/i);
+  for (const re of pats) { const m = s.match(re); if (m && +m[1] > 0) return String(+m[1]); }
+  return null;
 }
 const CRIB_RE = /crib|solution|soln|answers?\b/i;
 function guessKind(name, head) {
@@ -641,58 +669,150 @@ function guessKind(name, head) {
   if (/engineering tripos|answer not more than|answer all questions/i.test(head)) return 'tripos';
   return 'paper';
 }
-async function importPdf(f, zone) {
-  toast(`Reading ${f.name}…`);
-  const lines = await pdfLines(await f.arrayBuffer());
+const KINDS = { paper: 'Examples paper', crib: 'Examples paper crib', tripos: 'Tripos paper', tripcrib: 'Tripos crib', sched: 'Question guide' };
+const isTripKind = k => k === 'tripos' || k === 'tripcrib';
+const isCribKind = k => k === 'crib' || k === 'tripcrib';
+/* Read a PDF and guess what it is. Nothing is changed until the import is confirmed. */
+async function analysePdf(f, zone) {
+  let lines = [], err = '';
+  try { lines = await pdfLines(await f.arrayBuffer()); }
+  catch (e) { err = 'Couldn’t read the text of this PDF, so fill in the details by hand.'; }
   const head = lines.slice(0, 40).join('\n');
-  let code = findCode(f.name) || (S.ui.view === 'course' ? S.ui.course : null) || findCode(head);
-  if (!code) { code = (prompt(`Which course is “${f.name}” for? (e.g. 3A5)`) || '').trim().toUpperCase(); if (!code) return; }
-  const c = ensureCourse(code);
-  if (zone === 'sched') return applyScheduleText(c, lines.join('\n'), `from ${f.name}`);
-
-  let kind = guessKind(f.name, head);
+  const code = findCode(f.name) || (S.ui.view === 'course' ? S.ui.course : '') || findCode(head) || '';
+  let kind = zone === 'sched' ? 'sched' : guessKind(f.name, head);
   if (zone === 'tripos') kind = CRIB_RE.test(f.name) ? 'tripcrib' : 'tripos';
-  if (zone === 'paper' && (kind === 'tripos' || kind === 'tripcrib')) kind = CRIB_RE.test(f.name) ? 'crib' : 'paper';
-  const nq = countQuestions(lines);
-
-  if (kind === 'paper' || kind === 'crib') {
-    let num = findPaperNum(f.name) || findPaperNum(head);
-    if (!num) {
-      const next = String((c.papers.map(p => +p.num).sort((a, b) => b - a)[0] || 0) + (kind === 'crib' ? 0 : 1) || 1);
-      num = (prompt(`Which examples paper number is “${f.name}”?`, next) || '').trim();
-      if (!num) return; num = String(+num || num);
-    }
-    let p = c.papers.find(x => x.num === num);
-    const isNew = !p;
-    if (!p) { p = { id: uid(), num, title: '', nq: 0, pdf: null, crib: null, questions: [] }; c.papers.push(p); c.papers.sort((a, b) => numSort(a.num, b.num)); }
-    const key = `pdf:${code}:${p.id}:${kind}`;
-    await idbPut(key, f);
-    if (kind === 'crib') { p.crib = key; if (isNew && nq) resizeQs(p, nq); }
-    else {
-      p.pdf = key;
-      if (nq > p.questions.length) resizeQs(p, nq);
-      const tl = lines.slice(0, 12).find(l => /examples?\s+paper/i.test(l));
-      if (!p.title && tl) p.title = tl.replace(/.*examples?\s+paper\s*\d*\s*[:\-–]?\s*/i, '').trim().slice(0, 80);
-    }
-    c.tab = 'examples'; c.activePaper = p.id; S.ui.view = 'course'; S.ui.course = code;
-    save(); render();
-    toast(kind === 'crib' ? `Crib attached to ${code} examples paper ${num}`
-      : `${code} examples paper ${num}: ${nq ? `found ${nq} questions` : 'could not count questions — set the number with + / −'}${!isNew ? ' (updated)' : ''}`);
-  } else {
-    const ym = f.name.match(/\b(19|20)\d{2}\b/) || head.match(/\b(19|20)\d{2}\b/);
-    let year = ym ? ym[0] : (prompt(`Which year is the tripos paper “${f.name}”?`) || '').trim();
-    if (!year) return;
-    let p = c.tripos.find(x => x.year === year);
-    if (!p) { p = { id: uid(), year, pdf: null, crib: null, nq: 0, questions: [] }; c.tripos.push(p); c.tripos.sort((a, b) => numSort(b.year, a.year)); }
-    const key = `pdf:${code}:${p.id}:${kind}`;
-    await idbPut(key, f);
-    if (kind === 'tripcrib') p.crib = key;
-    else { p.pdf = key; }
-    if (!p.questions.length) resizeQs(p, nq && nq <= 8 ? nq : 3);
-    c.tab = 'tripos'; c.activeTrip = p.id; S.ui.view = 'course'; S.ui.course = code;
-    save(); render();
-    toast(`${code} tripos ${year}: ${kind === 'tripcrib' ? 'crib attached' : `${p.questions.length} questions`}`);
+  if (zone === 'paper' && isTripKind(kind)) kind = CRIB_RE.test(f.name) ? 'crib' : 'paper';
+  const fromName = findPaperNum(f.name), fromText = findPaperNum(head, true);
+  let num = fromName || fromText || '', numNote = fromName ? 'from file name' : fromText ? 'from the paper' : '';
+  if (!num && kind === 'paper' && code && S.courses[code]) { num = String((S.courses[code].papers.map(p => +p.num || 0).sort((x, y) => y - x)[0] || 0) + 1); numNote = 'guessed: check'; }
+  else if (!num && kind === 'paper') { num = '1'; numNote = 'guessed: check'; }
+  const ym = f.name.match(/\b(19|20)\d{2}\b/) || head.match(/\b(19|20)\d{2}\b/);
+  const tl = lines.slice(0, 12).find(l => /examples?\s+paper/i.test(l));
+  return { id: uid(), file: f, lines, code, kind, num, numNote, year: ym ? ym[0] : '', nq: countQuestions(lines), nqEdited: false,
+    title: tl ? tl.replace(/.*examples?\s+paper\s*\d*\s*[:\-–]?\s*/i, '').trim().slice(0, 80) : '', err };
+}
+function impTarget(r) {
+  const code = r.code.trim().toUpperCase(), c = S.courses[code];
+  const key = isTripKind(r.kind) ? r.year.trim() : String(+r.num || r.num.trim());
+  const p = c && (isTripKind(r.kind) ? c.tripos.find(x => x.year === key) : c.papers.find(x => x.num === key));
+  return { code, c, key, p };
+}
+function impEffect(r) {
+  const { code, c, key, p } = impTarget(r);
+  if (!code) return { bad: true, text: 'Enter the course code' };
+  const nc = c ? '' : `New course ${code}. `;
+  if (r.kind === 'sched') return { text: `${nc}Sets when each question in ${code} can be done` };
+  if (!key) return { bad: true, text: isTripKind(r.kind) ? 'Enter the year' : 'Enter the paper number' };
+  const what = isTripKind(r.kind) ? `tripos ${key}` : `examples paper ${key}`;
+  const dup = imp.rows.find(o => o !== r && o.kind === r.kind && impTarget(o).code === code && impTarget(o).key === key);
+  const dupNote = dup ? ` Another file in this list goes to the same place.` : '';
+  if (isCribKind(r.kind)) {
+    const fromList = !p && imp.rows.some(o => o !== r && !isCribKind(o.kind) && isTripKind(o.kind) === isTripKind(r.kind) && impTarget(o).code === code && impTarget(o).key === key);
+    return { text: `${nc}${p ? (p.crib ? `Replaces the crib of ${what}` : `Adds the crib to ${what}`) : fromList ? `Adds the crib to ${what} (from this list)` : `Creates ${what} with this crib`}.${dupNote}`, warn: !!dup || (!!p && !!p.crib) };
   }
+  if (p) return { text: `${nc}${p.pdf ? `Replaces the PDF of ${what}` : `Attaches the PDF to ${what}`} (your progress is kept).${dupNote}`, warn: true };
+  return { text: `${nc}New ${what}.${dupNote}`, warn: !!dup };
+}
+const imp = { rows: [] };
+function openImport(rows) {
+  imp.rows = rows;
+  let dlg = $('#imp');
+  if (!dlg) {
+    dlg = document.createElement('dialog'); dlg.id = 'imp'; dlg.className = 'imp';
+    document.body.appendChild(dlg);
+    dlg.addEventListener('input', e => impField(e.target));
+    dlg.addEventListener('change', e => impField(e.target, true));
+    dlg.addEventListener('click', e => {
+      const b = e.target.closest('[data-impact]'); if (!b) return;
+      if (b.dataset.impact === 'cancel') { dlg.close(); imp.rows = []; }
+      if (b.dataset.impact === 'remove') { imp.rows = imp.rows.filter(r => r.id !== b.dataset.r); imp.rows.length ? renderImport() : dlg.close(); }
+      if (b.dataset.impact === 'go') commitImport();
+    });
+    dlg.addEventListener('cancel', () => { imp.rows = []; });
+  }
+  renderImport();
+  if (!dlg.open) dlg.showModal();
+}
+function impField(el, structural) {
+  const r = imp.rows.find(x => x.id === el.dataset.r); if (!r) return;
+  const f = el.dataset.imp; if (!f) return;
+  r[f] = f === 'code' ? el.value.toUpperCase() : el.value;
+  if (f === 'nq') r.nqEdited = true;
+  if (f === 'num') r.numNote = '';
+  if (structural && f === 'kind') return renderImport();
+  const ef = impEffect(r), cell = $(`#imp-ef-${r.id}`);
+  if (cell) { cell.textContent = ef.text; cell.className = 'imp-ef' + (ef.bad ? ' bad' : ef.warn ? ' warn' : ''); }
+  if (f === 'code' && el.value.toUpperCase() !== el.value) { const pos = el.selectionStart; el.value = el.value.toUpperCase(); el.setSelectionRange(pos, pos); }
+  $('#imp-go').disabled = imp.rows.some(x => impEffect(x).bad);
+}
+function renderImport() {
+  const dlg = $('#imp');
+  const codes = S.order.map(c => `<option value="${esc(c)}">${esc(S.courses[c].name || '')}</option>`).join('');
+  dlg.innerHTML = `
+  <div class="imp-head"><h2>Check before importing</h2><p class="muted">Correct anything that was read wrongly. Nothing changes until you import.</p></div>
+  <datalist id="imp-codes">${codes}</datalist>
+  <div class="imp-body"><table class="imp-tbl"><thead><tr><th>File</th><th>Course</th><th>Type</th><th>Paper / year</th><th>Questions</th><th>What happens</th><th></th></tr></thead><tbody>
+  ${imp.rows.map(r => {
+    const ef = impEffect(r), trip = isTripKind(r.kind), crib = isCribKind(r.kind);
+    const numCell = r.kind === 'sched' ? '<span class="muted">—</span>'
+      : trip ? `<input data-imp="year" data-r="${r.id}" value="${esc(r.year)}" placeholder="2024" inputmode="numeric" style="width:72px" aria-label="Year">`
+      : `<input data-imp="num" data-r="${r.id}" value="${esc(r.num)}" placeholder="1" inputmode="numeric" style="width:52px" aria-label="Paper number">${r.numNote ? `<small>${esc(r.numNote)}</small>` : ''}`;
+    const nqCell = r.kind === 'sched' || crib ? '<span class="muted">—</span>'
+      : `<input type="number" min="0" max="80" data-imp="nq" data-r="${r.id}" value="${r.nq || ''}" placeholder="?" style="width:60px" aria-label="Number of questions"><small>${r.nqEdited ? '' : r.nq ? 'counted' : 'not found'}</small>`;
+    return `<tr>
+      <td class="imp-file"><b>${esc(r.file.name)}</b>${r.err ? `<small class="bad">${esc(r.err)}</small>` : ''}</td>
+      <td><input data-imp="code" data-r="${r.id}" value="${esc(r.code)}" list="imp-codes" placeholder="3A3" style="width:70px;text-transform:uppercase" aria-label="Course code"></td>
+      <td><select data-imp="kind" data-r="${r.id}" aria-label="Type">${Object.entries(KINDS).map(([k, v]) => `<option value="${k}" ${r.kind === k ? 'selected' : ''}>${v}</option>`).join('')}</select></td>
+      <td>${numCell}</td><td>${nqCell}</td>
+      <td><span id="imp-ef-${r.id}" class="imp-ef${ef.bad ? ' bad' : ef.warn ? ' warn' : ''}">${esc(ef.text)}</span></td>
+      <td><button class="icon" data-impact="remove" data-r="${r.id}" aria-label="Don’t import ${esc(r.file.name)}" title="Don’t import this file">×</button></td></tr>`;
+  }).join('')}</tbody></table></div>
+  <div class="imp-foot"><button class="btn" data-impact="cancel">Cancel</button><button class="btn primary" id="imp-go" data-impact="go" ${imp.rows.some(x => impEffect(x).bad) ? 'disabled' : ''}>Import ${imp.rows.length} file${imp.rows.length === 1 ? '' : 's'}</button></div>`;
+}
+async function commitPdf(r) {
+  const { code, key } = impTarget(r);
+  const c = ensureCourse(code);
+  if (r.kind === 'sched') { applyScheduleText(c, r.lines.join('\n'), `from ${r.file.name}`); return `${code} question guide`; }
+  const trip = isTripKind(r.kind), crib = isCribKind(r.kind);
+  let p = trip ? c.tripos.find(x => x.year === key) : c.papers.find(x => x.num === key);
+  const isNew = !p;
+  if (!p) {
+    p = trip ? { id: uid(), year: key, pdf: null, crib: null, nq: 0, questions: [] } : { id: uid(), num: key, title: '', nq: 0, pdf: null, crib: null, questions: [] };
+    (trip ? c.tripos : c.papers).push(p);
+    c.papers.sort((x, y) => numSort(x.num, y.num)); c.tripos.sort((x, y) => numSort(y.year, x.year));
+  }
+  const n = parseInt(r.nq, 10) || 0;
+  if (!crib) {
+    if (r.nqEdited && n !== p.questions.length) resizeQs(p, n);
+    else if (n > p.questions.length) resizeQs(p, n);
+    else if (isNew && trip && !p.questions.length) resizeQs(p, 3);
+    if (!trip && !p.title && r.title) p.title = r.title;
+  } else if (isNew && n) resizeQs(p, n);
+  const k = `pdf:${code}:${p.id}:${r.kind}`;
+  try { await idbPut(k, r.file); p[crib ? 'crib' : 'pdf'] = k; }
+  catch (e) { toast(`${r.file.name} was added, but the PDF couldn’t be stored in this browser (${e.message}).`, 'err'); }
+  c.tab = trip ? 'tripos' : 'examples';
+  if (trip) c.activeTrip = p.id; else c.activePaper = p.id;
+  S.ui.view = 'course'; S.ui.course = code;
+  return `${code} ${trip ? 'tripos ' + key : 'paper ' + key}${crib ? ' crib' : ''}`;
+}
+async function commitImport() {
+  const rows = imp.rows.slice(); $('#imp').close(); imp.rows = [];
+  const done = [];
+  for (const r of rows) { try { done.push(await commitPdf(r)); } catch (e) { console.error(e); toast(`${r.file.name}: ${e.message}`, 'err'); } }
+  save(); render();
+  if (done.length) toast('Imported ' + done.join(', '));
+}
+/* Attach or replace a PDF on an existing paper from its own page */
+async function attachPdf(file, d) {
+  const c = cur(), p = getP(d), which = d.which;
+  if (!file || !/\.pdf$/i.test(file.name)) { toast('Choose a PDF file.', 'err'); return; }
+  const k = `pdf:${c.code}:${p.id}:${d.kind === 'trip' ? (which === 'crib' ? 'tripcrib' : 'tripos') : (which === 'crib' ? 'crib' : 'paper')}`;
+  await idbPut(k, file); p[which] = k;
+  if (which === 'pdf' && d.kind === 'paper' && !p.questions.length) {
+    try { const n = countQuestions(await pdfLines(await file.arrayBuffer())); if (n) resizeQs(p, n); } catch (e) {}
+  }
+  save(); render(); toast(`${which === 'crib' ? 'Crib' : 'Paper PDF'} saved: ${file.name}`);
 }
 async function openPdf(key) {
   const w = window.open('', '_blank');
@@ -775,7 +895,7 @@ async function importSchedule(f) {
   const c = cur();
   if (S.ui.view !== 'course' || !c) { toast('Open a course first, then drop the guide on its Examples papers tab.', 'err'); return; }
   const n = (f.name || '').toLowerCase();
-  if (n.endsWith('.pdf')) return importPdf(f, 'sched');
+  if (n.endsWith('.pdf')) return openImport([await analysePdf(f, 'sched')]);
   let text;
   if ((f.type || '').startsWith('image/')) { c.tab = 'examples'; render(); text = await ocrImage(f); }
   else text = await f.text();
@@ -1359,7 +1479,7 @@ function examplesTab(c) {
   const p = c.papers.find(x => x.id === c.activePaper) || c.papers[0];
   return `
   <div class="dropzone" data-drop="paper">
-    <p><b>Drop examples paper PDFs here.</b> <span class="muted">Course and paper number come from the file name or first page (e.g. 3A5_EP2.pdf); files named with “crib” attach as the crib.</span></p>
+    <p><b>Drop examples paper PDFs here.</b> <span class="muted">Several at once is fine, cribs included. You’ll see what was detected (course, paper number, questions) and can correct it before anything is added.</span></p>
     <button class="btn" data-act="add-paper">Add paper without PDF</button>
   </div>
   ${sectionsPanel(c)}
@@ -1394,15 +1514,25 @@ function qTable(c, p, kind) {
   }).join('');
   return `<div class="scroll"><table class="tbl"><thead><tr><th>Question</th>${isP ? '<th>Available after</th>' : ''}<th>Status</th><th>Date</th>${!isP ? '<th>Time</th>' : ''}<th>Crib</th><th>Comment</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
+function moveSelect(c, dd) {
+  if (S.order.length < 2) return '';
+  return `<label class="move">Course <select data-f="pmove" ${dd} aria-label="Move to another course">${S.order.map(k => `<option value="${esc(k)}" ${k === c.code ? 'selected' : ''}>${esc(k)}</option>`).join('')}</select></label>`;
+}
+function pdfButtons(p, dd) {
+  const one = (which, label) => p[which]
+    ? `<span class="pdfpair"><button class="btn" data-act="pdf" data-key="${p[which]}">Open ${label}</button><label class="btn" title="Replace the ${label} PDF">Replace<input type="file" accept=".pdf,application/pdf" hidden data-f="pfile" data-which="${which}" ${dd}></label></span>`
+    : `<label class="btn">Attach ${label} PDF<input type="file" accept=".pdf,application/pdf" hidden data-f="pfile" data-which="${which}" ${dd}></label>`;
+  return one('pdf', 'paper') + one('crib', 'crib');
+}
 function paperView(c, p) {
   const dd = `data-kind="paper" data-pid="${p.id}"`;
   return `
   <div class="paper-head">
-    <h2>Examples paper ${esc(p.num)}</h2>
+    <h2 class="pnum-h">Examples paper <input class="pnum" data-f="pnum" ${dd} value="${esc(p.num)}" inputmode="numeric" aria-label="Paper number" title="Change the paper number"></h2>
     <input class="ptitle" data-f="ptitle" ${dd} value="${esc(p.title || '')}" placeholder="Topic" aria-label="Paper topic">
+    ${moveSelect(c, dd)}
     <span class="nq">Questions <button class="icon" data-act="nq" ${dd} data-d="-1" aria-label="One fewer question">−</button><b>${p.questions.length}</b><button class="icon" data-act="nq" ${dd} data-d="1" aria-label="One more question">+</button></span>
-    ${p.pdf ? `<button class="btn" data-act="pdf" data-key="${p.pdf}">Open paper</button>` : ''}
-    ${p.crib ? `<button class="btn" data-act="pdf" data-key="${p.crib}">Open crib</button>` : ''}
+    ${pdfButtons(p, dd)}
     <button class="btn danger" data-act="del-paper" ${dd}>Delete</button>
   </div>
   <details class="sched" ${c.scheduleText ? '' : 'open'}>${schedBox(c)}</details>
@@ -1422,10 +1552,9 @@ function triposTab(c) {
     const q = { green: 0, yellow: 0, red: 0, white: 0, grey: 0 }; x.questions.forEach(y => q[y.status || 'white']++);
     return `<button class="subtab ${p && x.id === p.id ? 'on' : ''}" data-act="trip" data-id="${x.id}">${esc(x.year)} ${stack(q)}</button>`;
   }).join('')}</div>` : ''}
-  ${p ? `<div class="paper-head"><h2>Tripos ${esc(p.year)}</h2><span style="flex:1"></span>
+  ${p ? `<div class="paper-head"><h2 class="pnum-h">Tripos <input class="pnum pyear" data-f="tyear" ${dd} value="${esc(p.year)}" inputmode="numeric" aria-label="Year" title="Change the year"></h2>${moveSelect(c, dd)}<span style="flex:1"></span>
       <span class="nq">Questions <button class="icon" data-act="nq" ${dd} data-d="-1" aria-label="One fewer question">−</button><b>${p.questions.length}</b><button class="icon" data-act="nq" ${dd} data-d="1" aria-label="One more question">+</button></span>
-      ${p.pdf ? `<button class="btn" data-act="pdf" data-key="${p.pdf}">Open paper</button>` : ''}
-      ${p.crib ? `<button class="btn" data-act="pdf" data-key="${p.crib}">Open crib</button>` : ''}
+      ${pdfButtons(p, dd)}
       <button class="btn danger" data-act="del-trip" ${dd}>Delete</button></div>
     ${LEGEND.replace('<span><i class="st-grey"></i>Not time yet</span>', '')}
     ${qTable(c, p, 'trip')}` : ''}`;
@@ -1627,6 +1756,31 @@ function field(f, el, ev) {
       q.unlock = v === sched ? null : v; save(); return render();
     }
     case 'lecdt': return; // applied with the ✓ button or Enter, so a half-typed date doesn't close the editor
+    case 'pnum': case 'tyear': {
+      const p = getP(d), trip = f === 'tyear', list = trip ? c.tripos : c.papers;
+      const v = trip ? el.value.trim() : String(+el.value.trim() || el.value.trim());
+      if (!v) { toast(trip ? 'Enter a year' : 'Enter a paper number', 'err'); return render(); }
+      if (list.some(x => x !== p && (trip ? x.year : x.num) === v)) { toast(`${trip ? 'Tripos ' : 'Examples paper '}${v} already exists in ${c.code}. Delete or renumber that one first.`, 'err'); return render(); }
+      if (trip) p.year = v; else p.num = v;
+      c.papers.sort((x, y) => numSort(x.num, y.num)); c.tripos.sort((x, y) => numSort(y.year, x.year));
+      save(); render(); toast(trip ? `Now tripos ${v}` : `Now examples paper ${v}${c.schedule[v] ? ' (the question guide for P' + v + ' applies)' : ''}`); return;
+    }
+    case 'pmove': {
+      const p = getP(d), to = S.courses[el.value]; if (!to || to === c) return;
+      const trip = d.kind === 'trip', from = trip ? c.tripos : c.papers, dest = trip ? to.tripos : to.papers;
+      const keyName = trip ? 'year' : 'num';
+      if (dest.some(x => x[keyName] === p[keyName])) {
+        const nv = trip ? (prompt(`${to.code} already has tripos ${p.year}. Year for this one?`) || '').trim() : String((dest.map(x => +x.num || 0).sort((a, b) => b - a)[0] || 0) + 1);
+        if (!nv || dest.some(x => x[keyName] === nv)) { toast('Not moved: that number is taken.', 'err'); return render(); }
+        p[keyName] = nv;
+      }
+      from.splice(from.indexOf(p), 1); dest.push(p);
+      to.papers.sort((x, y) => numSort(x.num, y.num)); to.tripos.sort((x, y) => numSort(y.year, x.year));
+      if (trip) to.activeTrip = p.id; else to.activePaper = p.id;
+      to.tab = trip ? 'tripos' : 'examples'; S.ui.course = to.code;
+      save(); render(); toast(`Moved to ${to.code} as ${trip ? 'tripos ' + p.year : 'examples paper ' + p.num}`); return;
+    }
+    case 'pfile': { const file = el.files[0]; el.value = ''; if (file) attachPdf(file, d).catch(e => toast(e.message, 'err')); return; }
     case 'secafter': c.sections[d.k].after = el.value ? +el.value : null; save(); return render();
     case 'secdone': c.sections[d.k].done = el.checked; save(); return render();
     case 'schedfile': { const file = el.files[0]; el.value = ''; if (file) importSchedule(file).catch(e => toast(e.message, 'err')); return; }
@@ -1658,15 +1812,28 @@ $('#file-any').addEventListener('change', e => { const fs = [...e.target.files];
 
 async function handleFiles(files, zone) {
   if (!zone && S.ui.view === 'course' && cur()) zone = { examples: 'paper', tripos: 'tripos' }[cur().tab] || null;
+  if (zone === 'any') zone = null;
+  const pdfs = [];
   for (const f of files) {
     const n = f.name.toLowerCase();
     try {
       if (n.endsWith('.ics') || f.type === 'text/calendar') importICS(await f.text(), f.name);
       else if (n.endsWith('.json')) await importBackupFile(f);
-      else if (n.endsWith('.pdf')) await importPdf(f, zone === 'any' ? null : zone);
+      else if (n.endsWith('.pdf')) pdfs.push(f);
       else if ((f.type || '').startsWith('image/') || n.endsWith('.txt')) await importSchedule(f);
       else toast(`${f.name}: drop .ics timetables, PDF papers, a screenshot or text of the question guide, or a .json backup.`, 'err');
     } catch (err) { console.error(err); toast(`${f.name}: ${err.message}`, 'err'); }
+  }
+  if (pdfs.length) {
+    toast(`Reading ${pdfs.length} PDF${pdfs.length > 1 ? 's' : ''}…`);
+    const rows = [];
+    for (const f of pdfs) rows.push(await analysePdf(f, zone));
+    /* guessed paper numbers: give each its own free number, so files in one drop don't land on the same paper */
+    for (const r of rows.filter(x => x.kind === 'paper' && x.numNote.startsWith('guessed'))) {
+      const code = r.code.toUpperCase(), used = new Set([...(S.courses[code] ? S.courses[code].papers.map(p => p.num) : []), ...rows.filter(o => o !== r && o.kind === 'paper' && o.code.toUpperCase() === code).map(o => o.num)]);
+      let n = 1; while (used.has(String(n))) n++; r.num = String(n);
+    }
+    openImport(rows);
   }
 }
 
